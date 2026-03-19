@@ -1,2 +1,4 @@
-tools/
+tools/midi2afx
+tools/afx_info
 input/
+tests/artifacts/
