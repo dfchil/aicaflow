@@ -110,15 +110,27 @@ The ARM7 driver remains intentionally simple: it advances a virtual clock, strea
 
 ## Memory Map (SPU RAM)
 
-- `0x00000000`: ARM7 Entry Point / Binary.
-- `0x001FFFE0`: Global 1ms Hardware Clock (Updated by ASM stub).
-- `0x001FFFE4`: Internal Last HW Clock.
-- `0x001FFFE8`: Virtual Seekable Clock.
-- `AFX_IPC_STATUS_ADDR`: IPC Status Struct (SH4/ARM7 communication).
-- `AFX_PLAYER_STATE_ADDR`: Active Song Header and Player State.
+```mermaid
+graph TD
+    subgraph AICA_RAM ["AICA 2-Megabyte RAM Stack"]
+        direction TB
 
-## Notes
+        TOP["<b>0x001FFFFF - RAM TOP</b>"] --- CLOCKS
+        CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFF0 - 0x001FFFFF<br/>(32 bytes)"]
 
-- The repo currently expects wavetable map JSON entries with `id`, `gm_idx`, `gm_name`, `filename`, `rel_path`, and `source`.
-- `midi2afx` consumes the map via the `gm_idx` and `id` fields and stores sample provenance in `afx_sample_desc_t`.
-- Integration tests use `input/bwv1007.mid` and `input/wavetables.map` as their default fixtures.
+        subgraph IPC_BLOCK ["<b>16KB IPC RESERVED BLOCK</b><br/>0x001FBFE0 - 0x001FFFF0"]
+            direction TB
+            QUEUE["<b>Command Queue Area</b><br/>(AICAFLOW_IPC_CMD_QUEUE_ADDR)<br/><i>SH-4 Input Buffer</i>"]
+            STATUS["<b>IPC Status Struct</b><br/>(aicaflow_ipc_status_t)<br/><i>SH4-ARM7 IPC CTRL</i>"]
+            QUEUE --- STATUS
+        end
+
+        CLOCKS --- IPC_BLOCK
+        IPC_BLOCK --- PLAYER
+        PLAYER["<b>Player Engine State</b><br/>(aicaflow_player_t) ~6.3 KB<br/><i>Located just below IPC block anchor</i>"]
+        PLAYER --- DYNAMIC
+        DYNAMIC["<b>Dynamic Memory Area</b><br/>(Heap / Waveforms / Songs)<br/><i>Grows upwards from end of driver</i>"]
+        DYNAMIC --- DRIVER
+        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 - Entry Code"]
+    end
+```

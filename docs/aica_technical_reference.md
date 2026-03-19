@@ -1,4 +1,4 @@
-# AICA Sound Processor: Master Technical Reference
+# AICA Sound Processor: Technical Reference
 
 This document is the consolidated, exhaustive reference for the Yamaha AICA sound processor used in the Sega Dreamcast. It combines all known hardware specifications, register layouts, DSP architecture, and emulator reverse-engineering into a single source of truth for low-level firmware development.
 
