@@ -46,6 +46,15 @@ reg_stat_t stats[] = {
     { 0xFF,             "OTHER",    0 }
 };
 
+static const afx_section_entry_t *find_section(const afx_section_entry_t *tab,
+                                               uint32_t count,
+                                               uint32_t id) {
+    for (uint32_t i = 0; i < count; i++) {
+        if (tab[i].id == id) return &tab[i];
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("Usage: %s <file.aicaflow> [wavetables.map]\n", argv[0]);
@@ -59,31 +68,63 @@ int main(int argc, char **argv) {
     long total_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    /* --- Read and validate header --- */
-    uint32_t magic = 0, version = 0;
-    fread(&magic, 4, 1, f);
-    fread(&version, 4, 1, f);
-    fseek(f, 0, SEEK_SET);
-
-    if (magic != AICAF_MAGIC) {
-        fprintf(stderr, "Error: Invalid AICA Flow Magic (Found 0x%08X)\n", magic);
-        fclose(f); return 1;
-    }
-
     afx_header_t head;
     if (fread(&head, 1, sizeof(head), f) != sizeof(head)) {
-        fprintf(stderr, "Error: Could not read header.\n"); fclose(f); return 1;
+        fprintf(stderr, "Error: Could not read header.\n");
+        fclose(f);
+        return 1;
+    }
+    if (head.magic != AICAF_MAGIC) {
+        fprintf(stderr, "Error: Invalid AICA Flow Magic (Found 0x%08X)\n", head.magic);
+        fclose(f);
+        return 1;
+    }
+    if (head.version != AICAF_VERSION) {
+        fprintf(stderr, "Error: Unsupported format version %u (expected %u).\n",
+                head.version, AICAF_VERSION);
+        fclose(f);
+        return 1;
     }
 
-    uint32_t sample_data_off  = head.sample_data_off;
-    uint32_t sample_data_size = head.sample_data_size;
-    uint32_t source_map_off   = head.sample_desc_off;
-    uint32_t source_map_count = head.sample_desc_count;
-    uint32_t flow_data_off  = head.flow_data_off;
-    uint32_t flow_data_size = head.flow_data_size;
+    if (head.section_count == 0 || head.section_table_size == 0) {
+        fprintf(stderr, "Error: Missing section table.\n");
+        fclose(f);
+        return 1;
+    }
+
+    afx_section_entry_t *sections = malloc(head.section_table_size);
+    if (!sections) {
+        fprintf(stderr, "Error: Out of memory reading section table.\n");
+        fclose(f);
+        return 1;
+    }
+    fseek(f, head.section_table_off, SEEK_SET);
+    if (fread(sections, 1, head.section_table_size, f) != head.section_table_size) {
+        fprintf(stderr, "Error: Could not read section table.\n");
+        free(sections);
+        fclose(f);
+        return 1;
+    }
+
+    const afx_section_entry_t *s_flow = find_section(sections, head.section_count, AFX_SECT_FLOW);
+    const afx_section_entry_t *s_sdes = find_section(sections, head.section_count, AFX_SECT_SDES);
+    const afx_section_entry_t *s_sdat = find_section(sections, head.section_count, AFX_SECT_SDAT);
+    if (!s_flow || !s_sdes || !s_sdat) {
+        fprintf(stderr, "Error: Missing required section(s).\n");
+        free(sections);
+        fclose(f);
+        return 1;
+    }
+
+    uint32_t sample_data_off  = s_sdat->offset;
+    uint32_t sample_data_size = s_sdat->size;
+    uint32_t source_map_off   = s_sdes->offset;
+    uint32_t source_map_count = s_sdes->count;
+    uint32_t flow_data_off    = s_flow->offset;
+    uint32_t flow_data_size   = s_flow->count;
     uint32_t total_ticks      = head.total_ticks;
 
-    uint32_t flow_cmd_bytes = flow_data_size * sizeof(afx_flow_cmd_t);
+    uint32_t flow_cmd_bytes = flow_data_size * sizeof(afx_cmd_t);
     double sample_pct = (double)sample_data_size / total_size * 100.0;
     double flow_cmd_pct = (double)flow_cmd_bytes / total_size * 100.0;
 
@@ -94,8 +135,9 @@ int main(int argc, char **argv) {
     printf("=== AICA Flow File Info: %s ===\n", argv[1]);
     printf("File Size:  %ld bytes\n", total_size);
     printf("Song Length: %02u:%02u\n", mm, ss);
-    printf("Magic:      0x%08X\n", magic);
-    printf("Version:    %u\n", version);
+    printf("Magic:      0x%08X\n", head.magic);
+    printf("Version:    %u\n", head.version);
+    printf("Sections:   %u\n", head.section_count);
     printf("Samples:    %u bytes (%.1f%%) (at offset 0x%X)\n", sample_data_size, sample_pct, sample_data_off);
     printf("Flow Cmds:  %u entries, %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_bytes, flow_cmd_pct, flow_data_off);
     printf("--------------------------------------\n");
@@ -119,10 +161,10 @@ int main(int argc, char **argv) {
         if (flow_data_size > 0) {
             fseek(f, flow_data_off, SEEK_SET);
             for (uint32_t i = 0; i < flow_data_size; i++) {
-                afx_flow_cmd_t cmd;
+                afx_cmd_t cmd;
                 if (fread(&cmd, 1, sizeof(cmd), f) != sizeof(cmd)) break;
 
-                /* In v2, SA_HI and SA_LO both store the full blob-local address */
+                /* SA_HI and SA_LO both store the full blob-local address */
                 if (cmd.reg == AICA_REG_SA_LO) {
                     slot_addr[cmd.slot] = cmd.value;
                     slot_has_addr[cmd.slot] = true;
@@ -199,6 +241,7 @@ int main(int argc, char **argv) {
         }
         if (addr_counts)    free(addr_counts);
         if (sample_formats) free(sample_formats);
+        free(sections);
         fclose(f);
         return 0;
     }

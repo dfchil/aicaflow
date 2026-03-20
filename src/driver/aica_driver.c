@@ -57,19 +57,28 @@ static inline void process_command(uint32_t cmd, uint32_t arg0) {
                 break;
             }
 
-            PLAYER_STATE->song_base    = arg0;
-            PLAYER_STATE->sample_base  = arg0 + hdr->sample_data_off;
-            PLAYER_STATE->flow_ptr     = arg0 + hdr->flow_data_off;
-            PLAYER_STATE->flow_count   = hdr->flow_data_size;
+            const afx_section_entry_t *flow_sect = afx_find_section(hdr, AFX_SECT_FLOW);
+            const afx_section_entry_t *sdat_sect = afx_find_section(hdr, AFX_SECT_SDAT);
+            const afx_section_entry_t *dspc_sect = afx_find_section(hdr, AFX_SECT_DSPC);
+            const afx_section_entry_t *dspm_sect = afx_find_section(hdr, AFX_SECT_DSPM);
+            if (!flow_sect || !sdat_sect) {
+                IPC_STATUS->arm_status = 3; // Error
+                break;
+            }
 
-            if (hdr->dsp_coef_size > 0) {
-                const uint32_t *src = (const uint32_t *)(uintptr_t)(arg0 + hdr->dsp_coef_off);
-                uint32_t words = hdr->dsp_coef_size >> 2;
+            PLAYER_STATE->song_base    = arg0;
+            PLAYER_STATE->sample_base  = arg0 + sdat_sect->offset;
+            PLAYER_STATE->flow_ptr     = arg0 + flow_sect->offset;
+            PLAYER_STATE->flow_count   = flow_sect->count;
+
+            if (dspc_sect && dspc_sect->size > 0) {
+                const uint32_t *src = (const uint32_t *)(uintptr_t)(arg0 + dspc_sect->offset);
+                uint32_t words = dspc_sect->size >> 2;
                 for (uint32_t w = 0; w < words; w++) AICA_DSP_COEF[w] = src[w];
             }
-            if (hdr->dsp_mpro_size > 0) {
-                const uint32_t *src = (const uint32_t *)(uintptr_t)(arg0 + hdr->dsp_mpro_off);
-                uint32_t words = hdr->dsp_mpro_size >> 2;
+            if (dspm_sect && dspm_sect->size > 0) {
+                const uint32_t *src = (const uint32_t *)(uintptr_t)(arg0 + dspm_sect->offset);
+                uint32_t words = dspm_sect->size >> 2;
                 for (uint32_t w = 0; w < words; w++) AICA_DSP_MPRO[w] = src[w];
             }
 
@@ -97,8 +106,8 @@ static inline void process_command(uint32_t cmd, uint32_t arg0) {
         case AICAF_CMD_SEEK:
         {
             uint32_t target = arg0;
-            const afx_flow_cmd_t *flow = (const afx_flow_cmd_t *)(uintptr_t)PLAYER_STATE->flow_ptr;
-            PLAYER_STATE->flow_idx = afx_flow_cmd_lower_bound_by_tick(
+            const afx_cmd_t *flow = (const afx_cmd_t *)(uintptr_t)PLAYER_STATE->flow_ptr;
+            PLAYER_STATE->flow_idx = afx_cmd_lower_bound_by_tick(
                 flow,
                 PLAYER_STATE->flow_count,
                 target
@@ -116,7 +125,7 @@ static inline void process_command(uint32_t cmd, uint32_t arg0) {
  * Execute Flow Command
  * Writing directly to G2 bus registers for specific slot/reg.
  */
-static inline void execute_flow_cmd(const afx_flow_cmd_t *cmd) {
+static inline void execute_cmd(const afx_cmd_t *cmd) {
     volatile uint32_t *reg_ptr = (volatile uint32_t *)(0x00800000 + (cmd->slot * 0x80) + (cmd->reg * 4));
     uint32_t val = cmd->value;
 
@@ -170,10 +179,10 @@ void arm_main(void) {
 
             // Simple Streaming Interpreter (While loop allows fast catching up if seeked forward)
             while (PLAYER_STATE->is_playing && PLAYER_STATE->flow_idx < PLAYER_STATE->flow_count) {
-                const afx_flow_cmd_t *next_cmd = &((const afx_flow_cmd_t *)(uintptr_t)(PLAYER_STATE->flow_ptr))[PLAYER_STATE->flow_idx];
+                const afx_cmd_t *next_cmd = &((const afx_cmd_t *)(uintptr_t)(PLAYER_STATE->flow_ptr))[PLAYER_STATE->flow_idx];
 
                 if (*AICA_VIRTUAL_CLOCK >= next_cmd->timestamp) {
-                    execute_flow_cmd(next_cmd);
+                    execute_cmd(next_cmd);
                     PLAYER_STATE->flow_idx++;
                     IPC_STATUS->flow_pos = PLAYER_STATE->flow_idx;
                 } else {

@@ -23,15 +23,17 @@ The result is a flow-command architecture where the runtime is deterministic and
 ## Binary Layout
 
 ```
-[afx_header_t]             - fixed-size header with section offsets/counts
-[sample data blob]         - raw ADPCM/PCM bytes, back-to-back
-[sample descriptor table]  - array of afx_sample_desc_t
-[flow command table]       - array of afx_flow_cmd_t
-[DSP microprogram]         - optional
-[DSP coefficients]         - optional
+[afx_header_t]             - compact format header (version, section table info)
+[afx_section_entry_t[]]    - typed section directory
+[FLOW]                     - array of afx_cmd_t
+[SDES]                     - array of afx_sample_desc_t
+[SDAT]                     - raw ADPCM/PCM bytes, back-to-back
+[DSPM]                     - optional DSP microprogram payload
+[DSPC]                     - optional DSP coefficient payload
+[META]                     - optional metadata payload
 ```
 
-All offsets in header are relative to file start.
+All section offsets are relative to file start.
 
 ---
 
@@ -41,23 +43,27 @@ All offsets in header are relative to file start.
 
 ```c
 #define AICAF_MAGIC    0xA1CAF200
-#define AICAF_VERSION  2
+#define AICAF_VERSION  1
 
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    uint32_t sample_data_off;
-    uint32_t sample_data_size;
-    uint32_t sample_desc_off;
-    uint32_t sample_desc_count;
-    uint32_t flow_data_off;
-    uint32_t flow_data_size;  // command count (not bytes)
-    uint32_t dsp_mpro_off;
-    uint32_t dsp_mpro_size;
-    uint32_t dsp_coef_off;
-    uint32_t dsp_coef_size;
-    uint32_t total_ticks;       // total duration in ms
+    uint32_t header_size;
+    uint32_t section_count;
+    uint32_t section_table_off;
+    uint32_t section_table_size;
+    uint32_t total_ticks;      // total duration in ms
+    uint32_t flags;
 } afx_header_t;
+
+typedef struct {
+    uint32_t id;               // AFX_SECT_* fourcc
+    uint32_t offset;           // file-relative byte offset
+    uint32_t size;             // bytes
+    uint32_t count;            // entry count for array sections
+    uint32_t align;            // alignment (typically 4)
+    uint32_t flags;
+} afx_section_entry_t;
 ```
 
 ### Sample Descriptor (`afx_sample_desc_t`)
@@ -87,7 +93,7 @@ typedef struct {
 } afx_sample_desc_t;
 ```
 
-### Flow Command Entry (`afx_flow_cmd_t`)
+### Flow Command Entry (`afx_cmd_t`)
 
 ```c
 typedef struct {
@@ -96,7 +102,7 @@ typedef struct {
     uint8_t  reg;
     uint16_t pad;
     uint32_t value;
-} afx_flow_cmd_t;
+} afx_cmd_t;
 ```
 
 ---
@@ -113,7 +119,7 @@ Preferred term in docs:
 - flow command
 
 Compatibility note:
-- Use `afx_flow_cmd_t` in code and docs
+- Use `afx_cmd_t` in code and docs
 
 ---
 

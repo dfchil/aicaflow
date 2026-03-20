@@ -1,15 +1,15 @@
 CC      = gcc
 CFLAGS  = -std=c2x -O2 -Wall -Wextra -I../include
 
-TARGETS = unit_v2
+TARGETS = unit_runtime
 
 all: $(TARGETS)
 
-unit_v2: test_v2_runtime.c
+unit_runtime: test_runtime.c
 	$(CC) $(CFLAGS) $< -o $@
 
 run: all
-	./unit_v2
+	./unit_runtime
 
 clean:
 	rm -f $(TARGETS)

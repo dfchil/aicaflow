@@ -9,6 +9,11 @@ import sys
 SAMPLE_RATE = 44100
 AICA_CLOCK = 44100
 
+AFX_MAGIC = 0xA1CAF200
+AFX_VERSION = 1
+SECT_FLOW = 0x574F4C46  # FLOW
+SECT_SDES = 0x53454453  # SDES
+
 class AFXEmulator:
     def __init__(self, afx_path, map_path):
         self.afx_path = afx_path
@@ -40,23 +45,49 @@ class AFXEmulator:
     def render(self, output_wav):
         print(f"Simulating AFX Hardware Playback: {self.afx_path}")
         with open(self.afx_path, 'rb') as f:
-            # Parse v2 header: 13 x uint32 = 52 bytes
-            hdr_bin = f.read(52)
-            if len(hdr_bin) < 52:
+            # Parse current header: 8 x uint32 = 32 bytes
+            hdr_bin = f.read(32)
+            if len(hdr_bin) < 32:
                 print("Error: Invalid AFX header size")
                 return
 
             (magic, ver,
-             s_data_off, s_data_sz,
-             desc_off, desc_cnt,
-             st_off, st_sz,
-             dsp_m_off, dsp_m_sz,
-             dsp_c_off, dsp_c_sz,
-             ticks) = struct.unpack('<IIIIIIIIIIIII', hdr_bin)
+             header_size, section_count,
+             section_table_off, section_table_size,
+             ticks, flags) = struct.unpack('<IIIIIIII', hdr_bin)
 
-            if magic != 0xA1CAF200:
+            if magic != AFX_MAGIC:
                 print(f"Error: Invalid Magic 0x{magic:08X}")
                 return
+            if ver != AFX_VERSION:
+                print(f"Error: Unsupported AFX version {ver}")
+                return
+
+            f.seek(section_table_off)
+            section_bin = f.read(section_table_size)
+            if len(section_bin) < section_table_size:
+                print("Error: Invalid section table")
+                return
+
+            sections = []
+            for i in range(section_count):
+                base = i * 24
+                entry = section_bin[base:base+24]
+                if len(entry) < 24:
+                    break
+                sid, off, size, count, align, sflags = struct.unpack('<IIIIII', entry)
+                sections.append({'id': sid, 'off': off, 'size': size, 'count': count})
+
+            sdes = next((s for s in sections if s['id'] == SECT_SDES), None)
+            flow = next((s for s in sections if s['id'] == SECT_FLOW), None)
+            if not sdes or not flow:
+                print("Error: Missing required SDES/FLOW sections")
+                return
+
+            desc_off = sdes['off']
+            desc_cnt = sdes['count']
+            st_off = flow['off']
+            st_sz = flow['count']
 
             # Load sample descriptors (afx_sample_desc_t = 32 bytes each)
             # source_id(4), gm_program(1), format(1), loop_mode(1), root_note(1),
@@ -92,15 +123,15 @@ class AFXEmulator:
                     if pcm is not None:
                         loaded_waveforms[path] = (pcm, rate)
 
-            # Load opcodes — st_sz is entry count in v2 (not byte count)
-            # afx_opcode_t: timestamp(4), slot(1), reg(1), pad(2), value(4) = 12 bytes
+            # Load flow commands — st_sz is an entry count
+            # afx_cmd: timestamp(4), slot(1), reg(1), pad(2), value(4) = 12 bytes
             f.seek(st_off)
-            opcodes = []
+            flow_cmds = []
             for _ in range(st_sz):
                 op_bin = f.read(12)
                 if len(op_bin) < 12: break
                 ts, slot, reg, pad, val = struct.unpack('<IBBHI', op_bin)
-                opcodes.append({'ts': ts, 'slot': slot, 'reg': reg, 'val': val})
+                flow_cmds.append({'ts': ts, 'slot': slot, 'reg': reg, 'val': val})
 
         # Simulation Initialization
         # Duration in samples based on max_timestamp in header
@@ -128,9 +159,9 @@ class AFXEmulator:
         for i in range(total_samples):
             ms = (i / SAMPLE_RATE) * 1000.0
             
-            # Process all opcodes due for this timestamp
-            while op_idx < len(opcodes) and opcodes[op_idx]['ts'] <= ms:
-                op = opcodes[op_idx]
+            # Process all flow commands due for this timestamp
+            while op_idx < len(flow_cmds) and flow_cmds[op_idx]['ts'] <= ms:
+                op = flow_cmds[op_idx]
                 op_idx += 1
                 
                 s_id = op['slot']

@@ -2,7 +2,7 @@
 
 A high-performance, low-overhead MIDI-to-AICA sequencer for the SEGA Dreamcast. This project enables streaming complex musical arrangements to the AICA SPU with minimal ARM7 CPU intervention by pre-computing timestamped register commands on the host side.
 
-The current `.afx` format is v2-only. The toolchain emits a self-contained file with a sample blob, per-sample descriptors, a flow-command table, and optional DSP payloads.
+The current `.afx` format is stable and single-track for this project. The toolchain emits a self-contained file with a sample blob, per-sample descriptors, a flow-command table, and optional DSP payloads.
 
 ## Project Architecture
 
@@ -27,18 +27,20 @@ The system is split into four main pieces:
 
 | Section | Description |
 | :--- | :--- |
-| **Header (`afx_header_t`)** | v2 header with offsets, sizes/counts, and total song duration in ms. |
-| **Sample Data Blob** | Raw ADPCM or PCM sample bytes packed back-to-back. |
-| **Sample Descriptor Table** | Array of `afx_sample_desc_t` entries with source ID, GM program, format, loop info, root note, sample rate, and offsets. |
-| **Flow Command Table** | Array of `afx_flow_cmd_t` entries: timestamp, slot, register, value. |
-| **DSP MPRO / COEF** | Optional embedded DSP microprogram and coefficient payloads. |
+| **Header (`afx_header_t`)** | Compact file header containing section-table location and total duration. |
+| **Section Table (`afx_section_entry_t[]`)** | Directory of typed chunks (`FLOW`, `SDES`, `SDAT`, optional `DSPM`, `DSPC`, `META`). |
+| **FLOW** | Array of `afx_cmd_t` entries: timestamp, slot, register, value. |
+| **SDES** | Array of `afx_sample_desc_t` entries with source ID, GM program, format, loop info, root note, sample rate, and offsets. |
+| **SDAT** | Raw ADPCM or PCM sample bytes packed back-to-back. |
+| **DSPM / DSPC / META** | Optional DSP and metadata payload sections. |
 
-Relevant v2 properties:
+Relevant format properties:
 
 - `AICAF_MAGIC = 0xA1CAF200`
-- `AICAF_VERSION = 2`
-- `flow_data_size` is a flow-command count, not a byte size
-- sample addresses in flow commands are blob-local offsets; the ARM7 driver adds the sample-data base at playback time
+- `AICAF_VERSION = 1`
+- Section order defaults to hot-first: `FLOW`, `SDES`, then `SDAT`
+- FLOW and SDES sections provide explicit `count` metadata in the section table
+- Sample addresses in flow commands are SDAT-local offsets; the ARM7 driver adds the SDAT base once at playback time
 
 ## Build Instructions
 
@@ -132,7 +134,7 @@ The SH4/ARM7 IPC interface currently supports:
 
 Control commands are transported over a ring queue in AICA RAM (`AFX_IPC_CMD_QUEUE_ADDR`) with SH4 as producer and ARM7 as consumer.
 
-For bring-up, SH4 can upload and initialize firmware with `afx_upload_and_init_firmware()`. This helper writes a 32-byte aligned dynamic-upload base marker immediately after the firmware image and resets allocator state.
+For bring-up, SH4 can upload and initialize firmware with `afx_upload_and_init_firmware()`. This helper uses the default firmware load address, writes a 32-byte aligned dynamic-upload base marker immediately after the firmware image, and resets allocator state tracked in SH4-side `aica_state_t`.
 
 The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the flow-command stream: global total-level scaling for music volume.
 

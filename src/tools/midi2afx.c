@@ -412,37 +412,37 @@ static void pack_file(const char *path, uint8_t program, uint32_t source_id, FIL
 static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t program,
                                   uint8_t ar, uint8_t rr,
                                   uint8_t velocity, uint8_t midi_pan,
-                                  afx_flow_cmd_t *cmds, uint32_t *cmd_idx) {
+                                  afx_cmd_t *cmds, uint32_t *cmd_idx) {
     patch_info_t p = instrument_bank[program];
     if (p.size == 0) return;
 
     /* Sample address: full blob-local offset in both HI and LO flow commands */
-    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, p.addr };
-    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, p.addr };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr };
 
     /* Loop registers: only emit when the descriptor has defined loop points */
     afx_sample_desc_t *desc = &sample_descs[program];
     if (desc->loop_mode != AFX_LOOP_NONE && desc->loop_end > 0) {
         uint32_t lsa = p.addr + desc->loop_start;
         uint32_t lea = p.addr + desc->loop_end;
-        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LSA_HI, 0, lsa };
-        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LSA_LO, 0, lsa };
-        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LEA_HI, 0, lea };
-        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LEA_LO, 0, lea };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA_HI, 0, lsa };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA_LO, 0, lsa };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA_HI, 0, lea };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA_LO, 0, lea };
     }
 
-    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_AR_SR,  0, (ar << 8) | 0 };
-    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_EGH_RR, 0, rr };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_AR_SR,  0, (ar << 8) | 0 };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_EGH_RR, 0, rr };
 
     /* Velocity -> Total Level: TL 0=loudest, 127=nearly silent. Invert vel. */
-    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_TOT_LVL, 0, (uint32_t)(127u - velocity) };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_TOT_LVL, 0, (uint32_t)(127u - velocity) };
 
     /* Pan: MIDI 0-127 -> AICA DIPAN 5-bit (stored in bits [20:16] of PAN_VOL). */
     uint8_t aica_pan = (uint8_t)((midi_pan * 31u) / 127u);
-    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_PAN_VOL, 0, (uint32_t)aica_pan << 20 };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_PAN_VOL, 0, (uint32_t)aica_pan << 20 };
 }
 typedef struct {
-    afx_flow_cmd_t cmd;
+    afx_cmd_t cmd;
     uint32_t seq;
 } sort_op_t;
 int cmp_flow_cmds(const void *a, const void *b) {
@@ -502,8 +502,24 @@ int main(int argc, char **argv) {
     if (!f_mid) { perror("MIDI open failed"); return 1; }
     FILE *f_out = fopen(output_afx, "wb");
     if (!f_out) { fclose(f_mid); perror("Output open failed"); return 1; }
-    afx_header_t header = { .magic = AICAF_MAGIC, .version = AICAF_VERSION };
-    fwrite(&header, sizeof(header), 1, f_out);
+    FILE *f_samples = tmpfile();
+    if (!f_samples) {
+        fclose(f_mid);
+        fclose(f_out);
+        perror("tmpfile failed");
+        return 1;
+    }
+
+    afx_header_t header = {
+        .magic = AICAF_MAGIC,
+        .version = AICAF_VERSION,
+        .header_size = sizeof(afx_header_t),
+        .section_count = 0,
+        .section_table_off = sizeof(afx_header_t),
+        .section_table_size = 0,
+        .total_ticks = 0,
+        .flags = 0,
+    };
     bool needed[128] = {0};
     fseek(f_mid, 14, SEEK_SET);
     char chunk[4];
@@ -548,7 +564,7 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (!dup) {
-                    pack_file(path, i, sid, f_out, &offset, use_adpcm, do_trim);
+                    pack_file(path, i, sid, f_samples, &offset, use_adpcm, do_trim);
                     source_count++;
                 } else {
                     printf("Reusing sample for Program %d [%08X]\n", i, sid);
@@ -557,13 +573,8 @@ int main(int argc, char **argv) {
             }
         }
     }
-    header.sample_data_off = sizeof(header);
-    header.sample_data_size = offset;
-    header.sample_desc_count = source_count;
+    uint32_t sample_data_size = offset;
     fseek(f_mid, 14, SEEK_SET);
-    header.flow_data_off = header.sample_data_off + header.sample_data_size;
-    /* Descriptor table goes between sample data and stream */
-    header.sample_desc_off = header.flow_data_off;
     afx_sample_desc_t *s_entries = malloc(sizeof(afx_sample_desc_t) * source_count);
     int s_idx = 0;
     for(int i=0; i<128; i++) {
@@ -583,14 +594,9 @@ int main(int argc, char **argv) {
         }
     }
     
-    fwrite(s_entries, sizeof(afx_sample_desc_t), source_count, f_out);
-    free(s_entries);
-    /* Advance stream offset past the descriptor table */
-    header.flow_data_off += (sizeof(afx_sample_desc_t) * source_count);
-    
     // Support large MIDI files by buffering flow commands before sorting
     sort_op_t *sort_buffer = malloc(sizeof(sort_op_t) * 1000000);
-    afx_flow_cmd_t *flow_cmd_buffer = malloc(sizeof(afx_flow_cmd_t) * 1000000);
+    afx_cmd_t *flow_cmd_buffer = malloc(sizeof(afx_cmd_t) * 1000000);
     uint32_t flow_cmd_count = 0;
     
     uint16_t ppqn = 96;
@@ -725,8 +731,8 @@ int main(int argc, char **argv) {
                                               channel_attack[chan], (uint8_t)rel,
                                               vel_shaped, channel_pan[chan],
                                               flow_cmd_buffer, &flow_cmd_count);
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_flow_cmd_t){ current_ms, slot, AICA_REG_FNS_OCT, 0, aica_pitch_convert(ratio) };
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_flow_cmd_t){ current_ms, slot, AICA_REG_CTL, 0, (1 << 15) | (instrument_bank[prog].format << 11) };
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ current_ms, slot, AICA_REG_FNS_OCT, 0, aica_pitch_convert(ratio) };
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ current_ms, slot, AICA_REG_CTL, 0, (1 << 15) | (instrument_bank[prog].format << 11) };
                         slot_note_on_ms[slot] = current_ms;
                         slot_note_on_prog[slot] = prog;
                         slot_active[slot] = true;
@@ -743,7 +749,7 @@ int main(int argc, char **argv) {
                             slot_active[slot] = false;
                         }
                         if (off_ms > max_timestamp) max_timestamp = off_ms;
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_flow_cmd_t){ off_ms, slot, AICA_REG_CTL, 0, (1 << 14) | (instrument_bank[prog].format << 11) };
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ off_ms, slot, AICA_REG_CTL, 0, (1 << 14) | (instrument_bank[prog].format << 11) };
                     }
                 } else if(status < 0xF0) { fgetc(f_mid); if(type != 0xD0) fgetc(f_mid); }
                 else if(status == 0xFF) { 
@@ -770,13 +776,84 @@ int main(int argc, char **argv) {
         flow_cmd_buffer[i] = sort_buffer[i].cmd;
     }
     free(sort_buffer);
-    fwrite(flow_cmd_buffer, sizeof(afx_flow_cmd_t), flow_cmd_count, f_out);
-    free(flow_cmd_buffer);
-    header.flow_data_size = flow_cmd_count;
+
+    afx_section_entry_t sections[3];
+    uint32_t section_count = 0;
+    uint32_t cursor = sizeof(afx_header_t) + (uint32_t)(3 * sizeof(afx_section_entry_t));
+    cursor = AFX_ALIGN4(cursor);
+
+    uint32_t flow_bytes = flow_cmd_count * (uint32_t)sizeof(afx_cmd_t);
+    sections[section_count++] = (afx_section_entry_t){
+        .id = AFX_SECT_FLOW,
+        .offset = cursor,
+        .size = flow_bytes,
+        .count = flow_cmd_count,
+        .align = 4,
+        .flags = 0,
+    };
+    cursor = AFX_ALIGN4(cursor + flow_bytes);
+
+    uint32_t sdes_bytes = source_count * (uint32_t)sizeof(afx_sample_desc_t);
+    sections[section_count++] = (afx_section_entry_t){
+        .id = AFX_SECT_SDES,
+        .offset = cursor,
+        .size = sdes_bytes,
+        .count = source_count,
+        .align = 4,
+        .flags = 0,
+    };
+    cursor = AFX_ALIGN4(cursor + sdes_bytes);
+
+    sections[section_count++] = (afx_section_entry_t){
+        .id = AFX_SECT_SDAT,
+        .offset = cursor,
+        .size = sample_data_size,
+        .count = 0,
+        .align = 4,
+        .flags = 0,
+    };
+
+    header.section_count = section_count;
+    header.section_table_off = sizeof(afx_header_t);
+    header.section_table_size = section_count * (uint32_t)sizeof(afx_section_entry_t);
     header.total_ticks = max_timestamp;
+
     fseek(f_out, 0, SEEK_SET);
     fwrite(&header, sizeof(header), 1, f_out);
-    fclose(f_mid); fclose(f_out);
+    fwrite(sections, sizeof(afx_section_entry_t), section_count, f_out);
+
+    long pos = ftell(f_out);
+    while ((uint32_t)pos < sections[0].offset) {
+        fputc(0, f_out);
+        pos++;
+    }
+
+    fwrite(flow_cmd_buffer, sizeof(afx_cmd_t), flow_cmd_count, f_out);
+    pos = ftell(f_out);
+    while (((uint32_t)pos & 3u) != 0u) {
+        fputc(0, f_out);
+        pos++;
+    }
+
+    fwrite(s_entries, sizeof(afx_sample_desc_t), source_count, f_out);
+    pos = ftell(f_out);
+    while ((uint32_t)pos < sections[2].offset) {
+        fputc(0, f_out);
+        pos++;
+    }
+
+    fseek(f_samples, 0, SEEK_SET);
+    uint8_t copy_buf[4096];
+    size_t n = 0;
+    while ((n = fread(copy_buf, 1, sizeof(copy_buf), f_samples)) > 0) {
+        fwrite(copy_buf, 1, n, f_out);
+    }
+
+    free(s_entries);
+    free(flow_cmd_buffer);
+    fclose(f_samples);
+    fclose(f_mid);
+    fclose(f_out);
     printf("Success: Generated %s with %u flow commands. Duration: %ums\n", output_afx, flow_cmd_count, max_timestamp);
     return 0;
 }

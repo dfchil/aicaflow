@@ -21,9 +21,12 @@
 #define SPU_RAM_UNCACHED 0xA0000000 /* Adjust if needed for specific KOS setup */
 
 #define AFX_DYNAMIC_DEFAULT_BASE 0x00002000u
+#define AFX_FIRMWARE_DEFAULT_ADDR 0x00000000u
 
-static uint32_t g_dyn_base = AFX_DYNAMIC_DEFAULT_BASE;
-static uint32_t g_dyn_cursor = AFX_DYNAMIC_DEFAULT_BASE;
+static aica_state_t g_aica_state = {
+    .dynamic_base = AFX_DYNAMIC_DEFAULT_BASE,
+    .dynamic_cursor = AFX_DYNAMIC_DEFAULT_BASE,
+};
 
 static volatile afx_ipc_status_t *get_ipc_status(void);
 
@@ -68,18 +71,18 @@ void afx_mem_reset(uint32_t dynamic_base) {
     if (dynamic_base == 0) dynamic_base = AFX_DYNAMIC_DEFAULT_BASE;
     dynamic_base = align_up_u32(dynamic_base, 32);
     if (dynamic_base >= AFX_PLAYER_STATE_ADDR) dynamic_base = AFX_DYNAMIC_DEFAULT_BASE;
-    g_dyn_base = dynamic_base;
-    g_dyn_cursor = dynamic_base;
+    g_aica_state.dynamic_base = dynamic_base;
+    g_aica_state.dynamic_cursor = dynamic_base;
 }
 
 uint32_t afx_mem_alloc(uint32_t size, uint32_t align) {
     uint32_t use_align = (align == 0) ? 32u : align;
-    uint32_t start = align_up_u32(g_dyn_cursor, use_align);
+    uint32_t start = align_up_u32(g_aica_state.dynamic_cursor, use_align);
     uint32_t end = start + size;
     if (size == 0 || end > AFX_PLAYER_STATE_ADDR || end < start) {
         return 0;
     }
-    g_dyn_cursor = end;
+    g_aica_state.dynamic_cursor = end;
     return start;
 }
 
@@ -98,10 +101,10 @@ uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size) {
 }
 
 bool afx_upload_and_init_firmware(const void *fw_data,
-                                  uint32_t fw_size,
-                                  uint32_t fw_spu_addr,
-                                  uint32_t *out_dynamic_base) {
+                                  uint32_t fw_size) {
     if (!fw_data || fw_size == 0) return false;
+
+    uint32_t fw_spu_addr = AFX_FIRMWARE_DEFAULT_ADDR;
 
     /* We store a u32 marker immediately after the firmware image. */
     uint32_t marker_addr = fw_spu_addr + fw_size;
@@ -122,8 +125,11 @@ bool afx_upload_and_init_firmware(const void *fw_data,
     memset((void *)(uintptr_t)(SPU_RAM_BASE + AFX_IPC_STATUS_ADDR), 0, sizeof(afx_ipc_status_t));
 
     afx_mem_reset(dynamic_base);
-    if (out_dynamic_base) *out_dynamic_base = dynamic_base;
     return true;
+}
+
+const aica_state_t *afx_get_state(void) {
+    return &g_aica_state;
 }
 
 static volatile afx_ipc_status_t *get_ipc_status(void) {

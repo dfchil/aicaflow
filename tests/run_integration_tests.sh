@@ -20,8 +20,8 @@ echo "[integration] inspecting output"
 ./tools/afx_info "$AFTMP" input/wavetables.map > "$INFOTMP"
 
 grep -q "Magic:[[:space:]]*0xA1CAF200" "$INFOTMP"
-grep -q "Version:[[:space:]]*2" "$INFOTMP"
+grep -q "Version:[[:space:]]*1" "$INFOTMP"
 grep -q "Sample Descriptors" "$INFOTMP"
-grep -q "Opcode Register Distribution" "$INFOTMP"
+grep -Eq "(Opcode|Flow Command) Register Distribution" "$INFOTMP"
 
 echo "PASS: integration tests"
