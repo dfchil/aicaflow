@@ -107,22 +107,6 @@ typedef struct {
 
 ---
 
-## Naming: "Opcode" vs "Flow Command"
-
-Is "opcode" misleading here? Slightly, yes.
-
-Reason:
-- "Opcode" suggests an interpreted VM instruction set
-- This stream is actually direct hardware register commands with timestamps
-
-Preferred term in docs:
-- flow command
-
-Compatibility note:
-- Use `afx_cmd_t` in code and docs
-
----
-
 ## AICA Register Command Targets
 
 (Previously titled "Opcode Register Reference")
