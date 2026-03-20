@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define AICAF_MAGIC     0xA1CAF200
 #define AICAF_VERSION   2
@@ -19,22 +20,46 @@
 #define AFX_LOOP_BIDIR  2
 #define AICA_TOTAL_RAM (2 * 1024 * 1024)
 
-#define AFX_IPC_QUEUE_SZ    0x2000
 #define AFX_MEM_CLOCKS      (AICA_TOTAL_RAM - 32)
-#define AFX_IPC_STATUS_ADDR ((AFX_MEM_CLOCKS - AFX_IPC_QUEUE_SZ) & ~31)
 
 #pragma pack(push, 1)
+
+typedef struct {
+    uint32_t song_base;        /* absolute SPU address of uploaded .afx */
+    uint32_t sample_base;      /* song_base + header.sample_data_off */
+    uint32_t flow_ptr;         /* song_base + header.flow_data_off */
+    uint32_t flow_count;       /* header.flow_data_size (flow-command count) */
+    uint32_t flow_idx;
+    uint32_t next_event_tick;
+    uint32_t is_playing;
+    uint32_t loop_count;
+} afx_player_state_t;
+
+typedef struct {
+    uint32_t cmd;
+    uint32_t arg0;
+    uint32_t arg1;
+    uint32_t arg2;
+} afx_ipc_cmd_t;
 
 typedef struct {
     uint32_t magic;
     uint32_t arm_status;    /* 0=Idle, 1=Playing, 2=Paused, 3=Error */
     uint32_t current_tick;  /* Current playback tick */
-    uint32_t stream_pos;    /* Offset into opcode stream */
+    uint32_t flow_pos;      /* Offset into flow-command stream */
     uint32_t volume;        /* Music volume 0-255 (255=full). Set via AICAF_CMD_VOLUME. */
-    uint32_t cmd;           /* Last command processed by ARM */
-    uint32_t cmd_arg;       /* Argument for last command */
+    uint32_t q_head;        /* SH4 producer index */
+    uint32_t q_tail;        /* ARM7 consumer index */
     uint32_t reserved;
 } afx_ipc_status_t;
+
+#define AFX_IPC_STATUS_ADDR ((AFX_MEM_CLOCKS - sizeof(afx_ipc_status_t)) & ~31)
+/* Command queue is the primary SH4<->ARM7 transport and is always reserved. */
+#define AFX_IPC_QUEUE_SZ    0x0400
+#define AFX_IPC_CMD_QUEUE_ADDR (AFX_IPC_STATUS_ADDR - AFX_IPC_QUEUE_SZ)
+#define AFX_PLAYER_STATE_ADDR ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_player_state_t)) & ~31)
+
+#define AFX_IPC_QUEUE_CAPACITY (AFX_IPC_QUEUE_SZ / sizeof(afx_ipc_cmd_t))
 
 /* SH4 -> ARM7 Command IDs */
 #define AICAF_CMD_NONE      0
@@ -42,10 +67,7 @@ typedef struct {
 #define AICAF_CMD_STOP      2
 #define AICAF_CMD_PAUSE     3
 #define AICAF_CMD_VOLUME    4  /* cmd_arg = new music volume (0-255) */
-#define AICAF_CMD_SEEK      5  /* cmd_arg = target position in ms; driver binary-searches stream */
-
-#define AFX_IPC_CMD_QUEUE_ADDR ((AFX_IPC_STATUS_ADDR + sizeof(afx_ipc_status_t) + 31) & ~31)
-#define AFX_PLAYER_STATE_ADDR  ((AICA_TOTAL_RAM - 0x4000) & ~31)
+#define AICAF_CMD_SEEK      5  /* cmd_arg = target position in ms; driver binary-searches flow commands */
 
 /* .afx header — 13 x uint32 = 52 bytes */
 typedef struct {
@@ -55,8 +77,8 @@ typedef struct {
     uint32_t sample_data_size;  /* total byte size of sample blob */
     uint32_t sample_desc_off;   /* byte offset to afx_sample_desc_t table */
     uint32_t sample_desc_count; /* number of afx_sample_desc_t entries */
-    uint32_t stream_data_off;   /* byte offset to afx_opcode_t array */
-    uint32_t stream_data_size;  /* number of afx_opcode_t entries */
+    uint32_t flow_data_off;     /* byte offset to afx_flow_cmd_t array */
+    uint32_t flow_data_size;    /* number of afx_flow_cmd_t entries */
     uint32_t dsp_mpro_off;      /* byte offset to DSP microprogram (0 = none) */
     uint32_t dsp_mpro_size;     /* byte size of DSP microprogram */
     uint32_t dsp_coef_off;      /* byte offset to DSP coefficients (0 = none) */
@@ -67,7 +89,7 @@ typedef struct {
 /*
  * Sample descriptor — 32 bytes (packed).
  *
- * SA_HI / SA_LO opcodes in the stream store the full blob-local byte offset
+ * SA_HI / SA_LO flow commands in the stream store the full blob-local byte offset
  * (equal to sample_off here).  The ARM7 driver adds
  * sample_base = (file_load_addr + sample_data_off) once at PLAY time and
  * extracts the appropriate bits per register write.  The precompiler never
@@ -95,7 +117,7 @@ typedef struct {
     uint8_t  reg;
     uint16_t pad;
     uint32_t value;
-} afx_opcode_t;
+} afx_flow_cmd_t;
 
 /* Scale an AICA total-level register value by a global music volume.
  * TL is inverted: 0=loudest, 255=silent. volume is 0..255. */
@@ -105,10 +127,10 @@ static inline uint32_t afx_scale_total_level(uint32_t tl, uint32_t volume) {
     return 255u - scaled;
 }
 
-/* Return the index of the first opcode whose timestamp is >= target_tick. */
-static inline uint32_t afx_opcode_lower_bound_by_tick(const afx_opcode_t *stream,
-                                                       uint32_t count,
-                                                       uint32_t target_tick) {
+/* Return the index of the first flow command whose timestamp is >= target_tick. */
+static inline uint32_t afx_flow_cmd_lower_bound_by_tick(const afx_flow_cmd_t *stream,
+                                                         uint32_t count,
+                                                         uint32_t target_tick) {
     uint32_t lo = 0;
     uint32_t hi = count;
     while (lo < hi) {
@@ -140,6 +162,26 @@ static inline uint32_t afx_opcode_lower_bound_by_tick(const afx_opcode_t *stream
 #define AICA_REG_FNS_OCT  0x0C /* Frequency Number (10 bits), Octave (4 bits) */
 #define AICA_REG_TOT_LVL  0x0D /* Total Level (TL) */
 #define AICA_REG_PAN_VOL  0x0E /* Pan, Volume */
+
+/* SH4-side host API (implemented in src/driver/aica_host_api.c) */
+bool afx_init(void);
+void afx_play(uint32_t song_spu_addr);
+void afx_stop(void);
+void afx_pause(void);
+uint32_t afx_get_tick(void);
+void afx_set_volume(uint8_t vol);
+bool afx_is_playing(void);
+void afx_seek(uint32_t tick_ms);
+
+/* SH4-side AICA RAM dynamic allocator/upload helpers */
+void afx_mem_reset(uint32_t dynamic_base);
+uint32_t afx_mem_alloc(uint32_t size, uint32_t align);
+bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size);
+uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size);
+bool afx_upload_and_init_firmware(const void *fw_data,
+                                  uint32_t fw_size,
+                                  uint32_t fw_spu_addr,
+                                  uint32_t *out_dynamic_base);
 
 
 #endif

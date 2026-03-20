@@ -45,13 +45,23 @@ The AICA space is mapped directly for the ARM7, and usually visible to the SH4 v
 | `0x00804580` | **EFREG** | 16 × 16-bit | DSP output buffer. |
 | `0x008045C0` | **EXTS** | 2 entries | External audio input. |
 
-### 2.3 Standard RAM Layout Pattern
-For typical homebrew or commercial drivers, the 2MB SDRAM is usually split into predefined rigid blocks:
-- `0x00000000`: ARM7 Driver Code + Sample Pool
-- `0x00180000`: Pattern / Song Data
-- `0x001C0000`: Engine Stack
+### 2.3 RAM Layout Guidance
+AICA Wave RAM does not enforce a fixed partition policy. Any layout is valid as long as code/data regions do not overlap and register-visible addresses remain within range.
 
-Samples must be aligned to 32-bit boundaries. ADPCM reduces memory usage by ~50% versus PCM16 but increases CPU complexity during encoding only (decode is handled in hardware).
+Generic guidance:
+- Keep ARM7 firmware and exception/stack area in a stable low-memory region.
+- Keep control/IPC metadata in a reserved high-memory block for deterministic host/driver coordination.
+- Use the remaining range as a data region for sample banks, sequence/command streams, and runtime uploads.
+
+Project suggestion (AICAFlow layout):
+- `0x001FFFE0 - 0x001FFFFF`: clock/timer mirror block (`AFX_MEM_CLOCKS`).
+- `0x001FFFC0 - 0x001FFFDF`: IPC status (`AFX_IPC_STATUS_ADDR`).
+- `0x001FFBC0 - 0x001FFFBF`: SH4->ARM7 ring queue (`AFX_IPC_CMD_QUEUE_ADDR`, `0x0400` bytes).
+- `0x001FFBA0 - 0x001FFBBF`: player state (`AFX_PLAYER_STATE_ADDR`).
+- `0x00002000 - 0x001FFBA0`: SH4-managed dynamic upload area (full `.afx` payloads uploaded in-place).
+- `0x00000000 - 0x00001FFF`: ARM7 firmware payload + startup data.
+
+Samples should be aligned to at least 32-bit boundaries. ADPCM typically reduces sample footprint by about 50% compared to PCM16, with encode-side complexity and hardware decode at playback.
 
 ---
 
@@ -224,10 +234,11 @@ void set_vibrato(int ch) {
 }
 ```
 
-### 5.2 Standalone Tracker Mapping
+### 5.2 Control-Loop Mapping Pattern (Implementation Example)
 
-A continuous tick loop handles tracker row parsing on the ARM7 via hardware timer interrupt.
-Avoid memory copies inside the ISR. Update registers dynamically.
+This section describes a common firmware strategy, not an AICA hardware requirement.
+A timer-driven loop can parse tracker rows or flow-command events on ARM7 and emit register updates incrementally.
+Avoid memory copies inside interrupt handlers; keep ISR work bounded and update slot/common registers directly.
 
 | MOD/XM Tracker Effect | Native AICA Hardware Feature | What It Sounds Like |
 | :--- | :--- | :--- |

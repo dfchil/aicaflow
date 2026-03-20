@@ -79,13 +79,13 @@ int main(int argc, char **argv) {
     uint32_t sample_data_size = head.sample_data_size;
     uint32_t source_map_off   = head.sample_desc_off;
     uint32_t source_map_count = head.sample_desc_count;
-    uint32_t stream_data_off  = head.stream_data_off;
-    uint32_t stream_data_size = head.stream_data_size;
+    uint32_t flow_data_off  = head.flow_data_off;
+    uint32_t flow_data_size = head.flow_data_size;
     uint32_t total_ticks      = head.total_ticks;
 
-    uint32_t opcode_bytes = stream_data_size * sizeof(afx_opcode_t);
+    uint32_t flow_cmd_bytes = flow_data_size * sizeof(afx_flow_cmd_t);
     double sample_pct = (double)sample_data_size / total_size * 100.0;
-    double opcode_pct = (double)opcode_bytes / total_size * 100.0;
+    double flow_cmd_pct = (double)flow_cmd_bytes / total_size * 100.0;
 
     uint32_t total_sec = total_ticks / 1000;
     uint32_t mm = total_sec / 60;
@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
     printf("Magic:      0x%08X\n", magic);
     printf("Version:    %u\n", version);
     printf("Samples:    %u bytes (%.1f%%) (at offset 0x%X)\n", sample_data_size, sample_pct, sample_data_off);
-    printf("Opcodes:    %u entries, %u bytes (%.1f%%) (at offset 0x%X)\n", stream_data_size, opcode_bytes, opcode_pct, stream_data_off);
+    printf("Flow Cmds:  %u entries, %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_bytes, flow_cmd_pct, flow_data_off);
     printf("--------------------------------------\n");
 
     // Scan Opcodes
@@ -116,27 +116,27 @@ int main(int argc, char **argv) {
             fread(descs, sizeof(afx_sample_desc_t), source_map_count, f);
         }
 
-        if (stream_data_size > 0) {
-            fseek(f, stream_data_off, SEEK_SET);
-            for (uint32_t i = 0; i < stream_data_size; i++) {
-                afx_opcode_t op;
-                if (fread(&op, 1, sizeof(op), f) != sizeof(op)) break;
+        if (flow_data_size > 0) {
+            fseek(f, flow_data_off, SEEK_SET);
+            for (uint32_t i = 0; i < flow_data_size; i++) {
+                afx_flow_cmd_t cmd;
+                if (fread(&cmd, 1, sizeof(cmd), f) != sizeof(cmd)) break;
 
                 /* In v2, SA_HI and SA_LO both store the full blob-local address */
-                if (op.reg == AICA_REG_SA_LO) {
-                    slot_addr[op.slot] = op.value;
-                    slot_has_addr[op.slot] = true;
+                if (cmd.reg == AICA_REG_SA_LO) {
+                    slot_addr[cmd.slot] = cmd.value;
+                    slot_has_addr[cmd.slot] = true;
                 }
 
                 bool found = false;
-                if (op.reg == AICA_REG_CTL) {
-                    uint32_t control_bits = op.value & ((1 << 15) | (1 << 14));
+                if (cmd.reg == AICA_REG_CTL) {
+                    uint32_t control_bits = cmd.value & ((1 << 15) | (1 << 14));
                     if (control_bits == (1 << 15)) {
                         stats[0].count++; /* KYON */
                         found = true;
-                        if (descs && addr_counts && slot_has_addr[op.slot]) {
+                        if (descs && addr_counts && slot_has_addr[cmd.slot]) {
                             for (uint32_t s = 0; s < source_map_count; s++) {
-                                if (descs[s].sample_off == slot_addr[op.slot]) {
+                                if (descs[s].sample_off == slot_addr[cmd.slot]) {
                                     addr_counts[s]++;
                                     if (sample_formats && sample_formats[s] < 0)
                                         sample_formats[s] = (int32_t)descs[s].format;
@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
                     }
                 } else {
                     for (int j = 3; stats[j].reg != 0xFF; j++) {
-                        if (stats[j].reg == op.reg) { stats[j].count++; found = true; break; }
+                        if (stats[j].reg == cmd.reg) { stats[j].count++; found = true; break; }
                     }
                 }
                 if (!found) stats[15].count++;

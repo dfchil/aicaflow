@@ -40,6 +40,15 @@ typedef struct {
     uint8_t  format; 
     uint32_t source_id;
 } patch_info_t;
+
+typedef struct {
+    uint16_t note_trim_ms;
+    uint16_t min_hold_ms;
+    float velocity_gamma;
+    float velocity_gain;
+    int8_t release_bias;
+} playback_policy_t;
+
 patch_info_t instrument_bank[128];
 afx_sample_desc_t sample_descs[128];
 [[nodiscard]] static uint32_t read_varlen(FILE *f) {
@@ -57,6 +66,134 @@ static int get_gm_family(int prog) {
     if (prog < 0 || prog > 127) return -1;
     return prog / 8;
 }
+
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static uint8_t apply_velocity_policy(uint8_t velocity, const playback_policy_t *policy) {
+    float norm = (float)velocity / 127.0f;
+    float curved = powf(norm, policy->velocity_gamma) * policy->velocity_gain;
+    int v = (int)lroundf(curved * 127.0f);
+    return (uint8_t)clamp_int(v, 1, 127);
+}
+
+static playback_policy_t default_policy_from_family_name(const char *family) {
+    playback_policy_t p = {0, 16, 1.0f, 1.0f, 0};
+    if (!family) return p;
+
+    if (strcmp(family, "keys_plucks") == 0) {
+        p = (playback_policy_t){120, 24, 1.2f, 1.0f, -2};
+    } else if (strcmp(family, "sustains_pads") == 0) {
+        p = (playback_policy_t){0, 40, 0.9f, 1.0f, 3};
+    } else if (strcmp(family, "basses") == 0) {
+        p = (playback_policy_t){60, 30, 1.05f, 1.0f, 1};
+    } else if (strcmp(family, "leads_winds") == 0) {
+        p = (playback_policy_t){35, 20, 1.1f, 1.0f, -1};
+    } else if (strcmp(family, "drums_percussion") == 0) {
+        p = (playback_policy_t){180, 12, 0.95f, 1.05f, -4};
+    } else if (strcmp(family, "fx_atmos") == 0) {
+        p = (playback_policy_t){20, 30, 1.15f, 0.95f, 2};
+    }
+    return p;
+}
+
+static void init_neutral_policies(playback_policy_t policies[128]) {
+    for (int i = 0; i < 128; i++) {
+        policies[i] = (playback_policy_t){0, 16, 1.0f, 1.0f, 0};
+    }
+}
+
+static bool parse_json_string_value(const char *line, char *out, size_t out_sz) {
+    const char *colon = strchr(line, ':');
+    if (!colon) return false;
+    const char *start = strchr(colon, '"');
+    if (!start) return false;
+    start++;
+    const char *end = strchr(start, '"');
+    if (!end) return false;
+    size_t n = (size_t)(end - start);
+    if (n >= out_sz) n = out_sz - 1;
+    memcpy(out, start, n);
+    out[n] = '\0';
+    return true;
+}
+
+static bool parse_json_int_value(const char *line, int *out) {
+    const char *colon = strchr(line, ':');
+    if (!colon) return false;
+    while (*colon && (*colon == ':' || *colon == ' ' || *colon == '\t')) colon++;
+    if (!*colon || *colon == 'n') return false;
+    return sscanf(colon, "%d", out) == 1;
+}
+
+static bool parse_json_float_value(const char *line, float *out) {
+    const char *colon = strchr(line, ':');
+    if (!colon) return false;
+    while (*colon && (*colon == ':' || *colon == ' ' || *colon == '\t')) colon++;
+    if (!*colon || *colon == 'n') return false;
+    return sscanf(colon, "%f", out) == 1;
+}
+
+static void load_program_policies_from_map(const char *map_path, playback_policy_t policies[128]) {
+    FILE *f = fopen(map_path, "r");
+    if (!f) return;
+
+    char line[1024];
+    int current_gm = -1;
+    char current_family[64] = "";
+    int trim_ms = -1;
+    int min_hold_ms = -1;
+    float velocity_gamma = -1.0f;
+    float velocity_gain = -1.0f;
+    int release_bias = 0;
+    bool release_bias_seen = false;
+
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, "\"gm_idx\"")) {
+            int gm = -1;
+            if (parse_json_int_value(line, &gm)) current_gm = gm;
+            else current_gm = -1;
+        } else if (strstr(line, "\"patch_family\"")) {
+            parse_json_string_value(line, current_family, sizeof(current_family));
+        } else if (strstr(line, "\"policy_note_trim_ms\"")) {
+            (void)parse_json_int_value(line, &trim_ms);
+        } else if (strstr(line, "\"policy_min_hold_ms\"")) {
+            (void)parse_json_int_value(line, &min_hold_ms);
+        } else if (strstr(line, "\"policy_velocity_gamma\"")) {
+            (void)parse_json_float_value(line, &velocity_gamma);
+        } else if (strstr(line, "\"policy_velocity_gain\"")) {
+            (void)parse_json_float_value(line, &velocity_gain);
+        } else if (strstr(line, "\"policy_release_bias\"")) {
+            if (parse_json_int_value(line, &release_bias)) release_bias_seen = true;
+        }
+
+        if (strchr(line, '}')) {
+            if (current_gm >= 0 && current_gm < 128) {
+                playback_policy_t p = default_policy_from_family_name(current_family);
+                if (trim_ms >= 0) p.note_trim_ms = (uint16_t)trim_ms;
+                if (min_hold_ms >= 0) p.min_hold_ms = (uint16_t)min_hold_ms;
+                if (velocity_gamma > 0.0f) p.velocity_gamma = velocity_gamma;
+                if (velocity_gain > 0.0f) p.velocity_gain = velocity_gain;
+                if (release_bias_seen) p.release_bias = (int8_t)clamp_int(release_bias, -31, 31);
+                policies[current_gm] = p;
+            }
+
+            current_gm = -1;
+            current_family[0] = '\0';
+            trim_ms = -1;
+            min_hold_ms = -1;
+            velocity_gamma = -1.0f;
+            velocity_gain = -1.0f;
+            release_bias = 0;
+            release_bias_seen = false;
+        }
+    }
+    fclose(f);
+}
+
 static char* find_sample_for_program(const char *map_path, uint8_t program, uint32_t *out_id) {
     if (!map_path) return NULL;
     FILE *f = fopen(map_path, "r");
@@ -266,53 +403,53 @@ static void pack_file(const char *path, uint8_t program, uint32_t source_id, FIL
     fclose(f_wav);
 }
 /*
- * write_patch_opcodes — emit all per-voice register writes for a note-on.
+ * write_patch_flow_cmds — emit all per-voice register writes for a note-on.
  *
  * SA encoding: both SA_HI and SA_LO carry the full blob-local byte offset
  * (p.addr).  The ARM7 driver adds sample_base once at PLAY time and then
  * extracts the correct bits per register type — no carry issues.
  */
-static void write_patch_opcodes(uint32_t timestamp, uint8_t slot, uint8_t program,
-                                uint8_t ar, uint8_t rr,
-                                uint8_t velocity, uint8_t midi_pan,
-                                afx_opcode_t *ops, uint32_t *op_idx) {
+static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t program,
+                                  uint8_t ar, uint8_t rr,
+                                  uint8_t velocity, uint8_t midi_pan,
+                                  afx_flow_cmd_t *cmds, uint32_t *cmd_idx) {
     patch_info_t p = instrument_bank[program];
     if (p.size == 0) return;
 
-    /* Sample address: full blob-local offset in both HI and LO opcodes */
-    ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_SA_HI, 0, p.addr };
-    ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr };
+    /* Sample address: full blob-local offset in both HI and LO flow commands */
+    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, p.addr };
+    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr };
 
     /* Loop registers: only emit when the descriptor has defined loop points */
     afx_sample_desc_t *desc = &sample_descs[program];
     if (desc->loop_mode != AFX_LOOP_NONE && desc->loop_end > 0) {
         uint32_t lsa = p.addr + desc->loop_start;
         uint32_t lea = p.addr + desc->loop_end;
-        ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_LSA_HI, 0, lsa };
-        ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_LSA_LO, 0, lsa };
-        ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_LEA_HI, 0, lea };
-        ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_LEA_LO, 0, lea };
+        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LSA_HI, 0, lsa };
+        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LSA_LO, 0, lsa };
+        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LEA_HI, 0, lea };
+        cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_LEA_LO, 0, lea };
     }
 
-    ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_AR_SR,  0, (ar << 8) | 0 };
-    ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_EGH_RR, 0, rr };
+    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_AR_SR,  0, (ar << 8) | 0 };
+    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_EGH_RR, 0, rr };
 
     /* Velocity -> Total Level: TL 0=loudest, 127=nearly silent. Invert vel. */
-    ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_TOT_LVL, 0, (uint32_t)(127u - velocity) };
+    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_TOT_LVL, 0, (uint32_t)(127u - velocity) };
 
     /* Pan: MIDI 0-127 -> AICA DIPAN 5-bit (stored in bits [20:16] of PAN_VOL). */
     uint8_t aica_pan = (uint8_t)((midi_pan * 31u) / 127u);
-    ops[(*op_idx)++] = (afx_opcode_t){ timestamp, slot, AICA_REG_PAN_VOL, 0, (uint32_t)aica_pan << 20 };
+    cmds[(*cmd_idx)++] = (afx_flow_cmd_t){ timestamp, slot, AICA_REG_PAN_VOL, 0, (uint32_t)aica_pan << 20 };
 }
 typedef struct {
-    afx_opcode_t op;
+    afx_flow_cmd_t cmd;
     uint32_t seq;
 } sort_op_t;
-int cmp_opcodes(const void *a, const void *b) {
+int cmp_flow_cmds(const void *a, const void *b) {
     sort_op_t *oa = (sort_op_t *)a;
     sort_op_t *ob = (sort_op_t *)b;
-    if (oa->op.timestamp < ob->op.timestamp) return -1;
-    if (oa->op.timestamp > ob->op.timestamp) return 1;
+    if (oa->cmd.timestamp < ob->cmd.timestamp) return -1;
+    if (oa->cmd.timestamp > ob->cmd.timestamp) return 1;
     if (oa->seq < ob->seq) return -1;
     if (oa->seq > ob->seq) return 1;
     return 0;
@@ -424,9 +561,9 @@ int main(int argc, char **argv) {
     header.sample_data_size = offset;
     header.sample_desc_count = source_count;
     fseek(f_mid, 14, SEEK_SET);
-    header.stream_data_off = header.sample_data_off + header.sample_data_size;
+    header.flow_data_off = header.sample_data_off + header.sample_data_size;
     /* Descriptor table goes between sample data and stream */
-    header.sample_desc_off = header.stream_data_off;
+    header.sample_desc_off = header.flow_data_off;
     afx_sample_desc_t *s_entries = malloc(sizeof(afx_sample_desc_t) * source_count);
     int s_idx = 0;
     for(int i=0; i<128; i++) {
@@ -449,14 +586,18 @@ int main(int argc, char **argv) {
     fwrite(s_entries, sizeof(afx_sample_desc_t), source_count, f_out);
     free(s_entries);
     /* Advance stream offset past the descriptor table */
-    header.stream_data_off += (sizeof(afx_sample_desc_t) * source_count);
+    header.flow_data_off += (sizeof(afx_sample_desc_t) * source_count);
     
-    // Support large MIDI files by buffering opcodes before sorting
+    // Support large MIDI files by buffering flow commands before sorting
     sort_op_t *sort_buffer = malloc(sizeof(sort_op_t) * 1000000);
-    afx_opcode_t *op_buffer = malloc(sizeof(afx_opcode_t) * 1000000);
-    uint32_t op_count = 0;
+    afx_flow_cmd_t *flow_cmd_buffer = malloc(sizeof(afx_flow_cmd_t) * 1000000);
+    uint32_t flow_cmd_count = 0;
     
     uint16_t ppqn = 96;
+    playback_policy_t program_policy[128];
+    init_neutral_policies(program_policy);
+    load_program_policies_from_map(map_path, program_policy);
+
     fseek(f_mid, 12, SEEK_SET);
     uint8_t d1 = fgetc(f_mid), d2 = fgetc(f_mid);
     if (!(d1 & 0x80)) ppqn = (d1 << 8) | d2;
@@ -532,6 +673,10 @@ int main(int argc, char **argv) {
     uint32_t max_timestamp = 0;
     uint8_t channel_progs[16];
     uint8_t channel_attack[16], channel_release[16], channel_pan[16];
+    uint32_t slot_note_on_ms[64] = {0};
+    uint8_t slot_note_on_prog[64] = {0};
+    bool slot_active[64] = {0};
+
     for (int i = 0; i < 16; i++) {
         channel_progs[i]   = default_channel_progs[i];
         channel_attack[i]  = default_channel_attack[i];
@@ -571,17 +716,34 @@ int main(int argc, char **argv) {
                     uint8_t slot = (chan * 4 + (note % 4)) & 0x3F;
                     if(type == 0x90 && vel > 0) {
                         uint8_t prog = channel_progs[chan];
+                        playback_policy_t policy = program_policy[prog];
+                        uint8_t vel_shaped = apply_velocity_policy(vel, &policy);
                         uint8_t root = sample_descs[prog].root_note ? sample_descs[prog].root_note : 60;
                         float ratio = midi_note_to_freq(note) / midi_note_to_freq(root);
-                        write_patch_opcodes(current_ms, slot, prog,
-                                            channel_attack[chan], channel_release[chan],
-                                            vel, channel_pan[chan],
-                                            op_buffer, &op_count);
-                        op_buffer[op_count++] = (afx_opcode_t){ current_ms, slot, AICA_REG_FNS_OCT, 0, aica_pitch_convert(ratio) };
-                        op_buffer[op_count++] = (afx_opcode_t){ current_ms, slot, AICA_REG_CTL, 0, (1 << 15) | (instrument_bank[prog].format << 11) };
+                        int rel = clamp_int((int)channel_release[chan] + (int)policy.release_bias, 0, 31);
+                        write_patch_flow_cmds(current_ms, slot, prog,
+                                              channel_attack[chan], (uint8_t)rel,
+                                              vel_shaped, channel_pan[chan],
+                                              flow_cmd_buffer, &flow_cmd_count);
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_flow_cmd_t){ current_ms, slot, AICA_REG_FNS_OCT, 0, aica_pitch_convert(ratio) };
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_flow_cmd_t){ current_ms, slot, AICA_REG_CTL, 0, (1 << 15) | (instrument_bank[prog].format << 11) };
+                        slot_note_on_ms[slot] = current_ms;
+                        slot_note_on_prog[slot] = prog;
+                        slot_active[slot] = true;
                     } else {
-                        uint8_t prog = channel_progs[chan];
-                        op_buffer[op_count++] = (afx_opcode_t){ current_ms, slot, AICA_REG_CTL, 0, (1 << 14) | (instrument_bank[prog].format << 11) };
+                        uint8_t prog = slot_active[slot] ? slot_note_on_prog[slot] : channel_progs[chan];
+                        playback_policy_t policy = program_policy[prog];
+                        uint32_t off_ms = current_ms;
+                        if (policy.note_trim_ms > 0 && off_ms > policy.note_trim_ms) {
+                            off_ms -= policy.note_trim_ms;
+                        }
+                        if (slot_active[slot]) {
+                            uint32_t min_off = slot_note_on_ms[slot] + policy.min_hold_ms;
+                            if (off_ms < min_off) off_ms = min_off;
+                            slot_active[slot] = false;
+                        }
+                        if (off_ms > max_timestamp) max_timestamp = off_ms;
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_flow_cmd_t){ off_ms, slot, AICA_REG_CTL, 0, (1 << 14) | (instrument_bank[prog].format << 11) };
                     }
                 } else if(status < 0xF0) { fgetc(f_mid); if(type != 0xD0) fgetc(f_mid); }
                 else if(status == 0xFF) { 
@@ -599,22 +761,22 @@ int main(int argc, char **argv) {
         } else fseek(f_mid, len, SEEK_CUR);
     }
     
-    for (uint32_t i = 0; i < op_count; i++) {
-        sort_buffer[i].op = op_buffer[i];
+    for (uint32_t i = 0; i < flow_cmd_count; i++) {
+        sort_buffer[i].cmd = flow_cmd_buffer[i];
         sort_buffer[i].seq = i;
     }
-    qsort(sort_buffer, op_count, sizeof(sort_op_t), cmp_opcodes);
-    for (uint32_t i = 0; i < op_count; i++) {
-        op_buffer[i] = sort_buffer[i].op;
+    qsort(sort_buffer, flow_cmd_count, sizeof(sort_op_t), cmp_flow_cmds);
+    for (uint32_t i = 0; i < flow_cmd_count; i++) {
+        flow_cmd_buffer[i] = sort_buffer[i].cmd;
     }
     free(sort_buffer);
-    fwrite(op_buffer, sizeof(afx_opcode_t), op_count, f_out);
-    free(op_buffer);
-    header.stream_data_size = op_count;
+    fwrite(flow_cmd_buffer, sizeof(afx_flow_cmd_t), flow_cmd_count, f_out);
+    free(flow_cmd_buffer);
+    header.flow_data_size = flow_cmd_count;
     header.total_ticks = max_timestamp;
     fseek(f_out, 0, SEEK_SET);
     fwrite(&header, sizeof(header), 1, f_out);
     fclose(f_mid); fclose(f_out);
-    printf("Success: Generated %s with %u opcodes. Duration: %ums\n", output_afx, op_count, max_timestamp);
+    printf("Success: Generated %s with %u flow commands. Duration: %ums\n", output_afx, flow_cmd_count, max_timestamp);
     return 0;
 }

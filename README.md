@@ -1,8 +1,8 @@
 # AICA Flow (AFX) Sequencer
 
-A high-performance, low-overhead MIDI-to-AICA sequencer for the SEGA Dreamcast. This project enables streaming complex musical arrangements to the AICA SPU with minimal ARM7 CPU intervention by pre-computing hardware register opcodes on the host side.
+A high-performance, low-overhead MIDI-to-AICA sequencer for the SEGA Dreamcast. This project enables streaming complex musical arrangements to the AICA SPU with minimal ARM7 CPU intervention by pre-computing timestamped register commands on the host side.
 
-The current `.afx` format is v2-only. The toolchain emits a self-contained file with a sample blob, per-sample descriptors, an opcode stream, and optional DSP payloads.
+The current `.afx` format is v2-only. The toolchain emits a self-contained file with a sample blob, per-sample descriptors, a flow-command table, and optional DSP payloads.
 
 ## Project Architecture
 
@@ -19,7 +19,7 @@ The system is split into four main pieces:
 - **Absolute Time Sequencing**: All MIDI events are pre-calculated into 1 ms absolute timestamps, including tempo changes across multiple tracks.
 - **Descriptor-Based Sample Packing**: The compiler emits per-sample metadata including format, loop mode, root note, loop points, and sample rate.
 - **Seekable Playback**: The ARM7 driver supports binary-search seek by target tick through IPC.
-- **Global Music Volume**: Runtime volume scaling is applied only to `TOT_LVL` writes; all other opcodes remain precomputed.
+- **Global Music Volume**: Runtime volume scaling is applied only to `TOT_LVL` writes; all other flow commands remain precomputed.
 - **Optional DSP Payloads**: `.afx` files can carry DSP coefficient and microprogram sections that are uploaded on song start.
 - **Test Coverage**: `make test` runs unit tests plus an end-to-end integration path that generates and inspects a real `.afx` file.
 
@@ -30,15 +30,15 @@ The system is split into four main pieces:
 | **Header (`afx_header_t`)** | v2 header with offsets, sizes/counts, and total song duration in ms. |
 | **Sample Data Blob** | Raw ADPCM or PCM sample bytes packed back-to-back. |
 | **Sample Descriptor Table** | Array of `afx_sample_desc_t` entries with source ID, GM program, format, loop info, root note, sample rate, and offsets. |
-| **Opcode Stream** | Array of `afx_opcode_t` entries: timestamp, slot, register, value. |
+| **Flow Command Table** | Array of `afx_flow_cmd_t` entries: timestamp, slot, register, value. |
 | **DSP MPRO / COEF** | Optional embedded DSP microprogram and coefficient payloads. |
 
 Relevant v2 properties:
 
 - `AICAF_MAGIC = 0xA1CAF200`
 - `AICAF_VERSION = 2`
-- `stream_data_size` is an opcode count, not a byte size
-- sample addresses in the stream are blob-local offsets; the ARM7 driver adds the sample-data base at playback time
+- `flow_data_size` is a flow-command count, not a byte size
+- sample addresses in flow commands are blob-local offsets; the ARM7 driver adds the sample-data base at playback time
 
 ## Build Instructions
 
@@ -67,9 +67,33 @@ python3 ./tools/generate_wavetable_map.py
 
 By default this scans `input/wavetable_collections` and writes `input/wavetables.map`.
 
+Generate a family-driven patch map (keys/pads/bass/leads/percussion/fx) from the scanned wavetable set:
+
+```bash
+python3 ./tools/build_family_patches.py
+```
+
+This reads `input/family_patch_profiles.json` and writes `input/wavetables.family.map` with one selected patch per GM program.
+It also writes coverage reports:
+
+- `input/wavetables.family.coverage.json`: machine-readable per-program assignments + duplicate stats
+- `input/wavetables.family.coverage.txt`: human-readable summary and full GM mapping table
+
+When a map entry includes family playback fields (`policy_note_trim_ms`, `policy_min_hold_ms`, `policy_velocity_gamma`, `policy_velocity_gain`, `policy_release_bias`), `midi2afx` applies them while generating flow commands:
+
+- note-off timing trim with a minimum hold guard
+- velocity shaping curve before Total-Level conversion
+- release-rate bias layered on top of MIDI CC-derived release
+
 Convert a MIDI file to the AFX format:
 ```bash
 ./tools/midi2afx input/bwv1007.mid output.afx input/wavetables.map
+```
+
+To use the family-driven map, pass `input/wavetables.family.map` instead:
+
+```bash
+./tools/midi2afx input/bwv1007.mid output.afx input/wavetables.family.map
 ```
 
 Useful options:
@@ -106,31 +130,43 @@ The SH4/ARM7 IPC interface currently supports:
 - `VOLUME`
 - `SEEK`
 
-The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the stream: global total-level scaling for music volume.
+Control commands are transported over a ring queue in AICA RAM (`AFX_IPC_CMD_QUEUE_ADDR`) with SH4 as producer and ARM7 as consumer.
+
+For bring-up, SH4 can upload and initialize firmware with `afx_upload_and_init_firmware()`. This helper writes a 32-byte aligned dynamic-upload base marker immediately after the firmware image and resets allocator state.
+
+The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the flow-command stream: global total-level scaling for music volume.
 
 ## Memory Map (SPU RAM)
+
+Current layout constants (from `include/afx/afx.h`):
+
+- `AFX_MEM_CLOCKS = 0x001FFFE0`
+- `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (32-byte status block)
+- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (0x0400 queue block)
+- `AFX_PLAYER_STATE_ADDR = 0x001FFBA0` (32-byte player state)
+
+The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place from the queued `PLAY` command argument and caches only absolute base pointers in `afx_player_state_t`.
 
 ```mermaid
 graph TD
     subgraph AICA_RAM ["AICA 2-Megabyte RAM Stack"]
         direction TB
 
-        TOP["<b>0x001FFFFF - RAM TOP</b>"] --- CLOCKS
-        CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFF0 - 0x001FFFFF<br/>(32 bytes)"]
+        CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
 
-        subgraph IPC_BLOCK ["<b>16KB IPC RESERVED BLOCK</b><br/>0x001FBFE0 - 0x001FFFF0"]
+        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFBA0 - 0x001FFFE0"]
             direction TB
-            QUEUE["<b>Command Queue Area</b><br/>(AICAFLOW_IPC_CMD_QUEUE_ADDR)<br/><i>SH-4 Input Buffer</i>"]
-            STATUS["<b>IPC Status Struct</b><br/>(aicaflow_ipc_status_t)<br/><i>SH4-ARM7 IPC CTRL</i>"]
-            QUEUE --- STATUS
+            QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
+            PLAYER["<b>Player State</b><br/>0x001FFBA0 - 0x001FFBBF<br/>(afx_player_state_t)"]
+            STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t)"]
+            QUEUE --- PLAYER
+            PLAYER --- STATUS
         end
 
         CLOCKS --- IPC_BLOCK
-        IPC_BLOCK --- PLAYER
-        PLAYER["<b>Player Engine State</b><br/>(aicaflow_player_t) ~6.3 KB<br/><i>Located just below IPC block anchor</i>"]
-        PLAYER --- DYNAMIC
-        DYNAMIC["<b>Dynamic Memory Area</b><br/>(Heap / Waveforms / Songs)<br/><i>Grows upwards from end of driver</i>"]
+        IPC_BLOCK --- DYNAMIC
+        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FFBA0"]
         DYNAMIC --- DRIVER
-        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 - Entry Code"]
+        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 ~2KB"]
     end
 ```

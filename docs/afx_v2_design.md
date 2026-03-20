@@ -1,252 +1,251 @@
-# .afx v2 Format Design
+# .afx Format Design
 
 ## Core Philosophy
 
-**The ARM7 driver is a dumb stream player.** It never has to reason about instruments, samples, DSP, or voice allocation. Its only job is:
+The ARM7 driver is a dumb stream player.
+It does not do instrument logic, sample lookup, or synthesis decisions.
 
+Driver responsibilities:
 1. Advance virtual clock
-2. When `virtual_clock >= opcode.timestamp`, write `opcode.value` to `AICA_BASE + slot*0x80 + reg*4`
-3. Handle IPC signals from SH4 (PLAY / STOP / PAUSE / VOLUME)
+2. When `virtual_clock >= flow_cmd.timestamp`, write `flow_cmd.value` to the target AICA register
+3. Process SH4->ARM7 control commands from IPC queue
 
-**All intelligence belongs in `midi2afx` (the host-side precompiler).** Because the compiler runs on a PC with full knowledge of:
-- Every sample's byte offset within the `.afx` sample blob
-- The full AICA register encoding for each voice parameter
-- The exact channel/voice state at every point in the timeline
+Host tool (`midi2afx`) responsibilities:
+- Parse MIDI and resolve musical intent
+- Select/pack samples and descriptors
+- Encode AICA register command stream
+- Bake per-note and per-voice decisions into flow commands
 
-...it can bake 100% complete, final register writes into the stream ahead of time. The driver never needs to decode, dispatch, or interpret anything beyond "write this value to this register at this time".
-
----
-
-## .afx v2 Binary Layout
-
-```
-[afx_header_v2_t]           - fixed-size header with all section offsets
-[sample data blob]          - raw ADPCM/PCM16 sample bytes, back-to-back
-[sample descriptor table]   - one afx_sample_desc_t per sample
-[stream opcodes]            - array of afx_opcode_t (unchanged format)
-[DSP microprogram]          - MPRO words (optional, may be zero-length)
-[DSP coefficients]          - COEF words (optional, may be zero-length)
-```
-
-All offsets in the header are relative to the start of the file.
+The result is a flow-command architecture where the runtime is deterministic and lightweight.
 
 ---
 
-## C Struct Definitions
+## Binary Layout
 
-### Header
-
-```c
-#define AFX_MAGIC_V2    0xA1CAF200
-#define AFX_VERSION_V2  2
-
-typedef struct {
-    uint32_t magic;              // 0xA1CAF200
-    uint32_t version;            // 2
-    uint32_t sample_data_off;    // byte offset to raw sample blob
-    uint32_t sample_data_size;   // total size of sample blob in bytes
-    uint32_t sample_desc_off;    // byte offset to sample descriptor table
-    uint32_t sample_desc_count;  // number of afx_sample_desc_t entries
-    uint32_t stream_data_off;    // byte offset to opcode array
-    uint32_t stream_data_size;   // total size of opcode array in bytes
-    uint32_t dsp_mpro_off;       // byte offset to DSP microprogram (0 = none)
-    uint32_t dsp_mpro_size;      // size of DSP microprogram in bytes
-    uint32_t dsp_coef_off;       // byte offset to DSP coefficients (0 = none)
-    uint32_t dsp_coef_size;      // size of DSP coefficients in bytes
-    uint32_t total_ticks;        // total song duration in ms
-} afx_header_v2_t;
+```
+[afx_header_t]             - fixed-size header with section offsets/counts
+[sample data blob]         - raw ADPCM/PCM bytes, back-to-back
+[sample descriptor table]  - array of afx_sample_desc_t
+[flow command table]       - array of afx_flow_cmd_t
+[DSP microprogram]         - optional
+[DSP coefficients]         - optional
 ```
 
-### Sample Descriptor
+All offsets in header are relative to file start.
 
-Replaces the old `afx_source_entry_t`. Carries everything the compiler needs to emit
-correct SA_HI/SA_LO/LSA_HI/LSA_LO/LEA_HI/LEA_LO opcodes and CTL format bits.
+---
+
+## Data Structures (Current)
+
+### Header (`afx_header_t`)
 
 ```c
-#define AFX_FMT_ADPCM   0   // Yamaha 4-bit ADPCM
-#define AFX_FMT_PCM16   1   // 16-bit signed PCM
-#define AFX_FMT_PCM8    2   // 8-bit unsigned PCM
-
-#define AFX_LOOP_NONE   0   // no loop
-#define AFX_LOOP_FWD    1   // normal forward loop
-#define AFX_LOOP_BIDIR  2   // bidirectional loop
+#define AICAF_MAGIC    0xA1CAF200
+#define AICAF_VERSION  2
 
 typedef struct {
-    uint32_t source_id;      // hash of originating WAV (for dedup / info tools)
-    uint8_t  gm_program;     // GM program number this was sourced from
-    uint8_t  format;         // AFX_FMT_*
-    uint8_t  loop_mode;      // AFX_LOOP_*
-    uint8_t  root_note;      // MIDI note of the recorded pitch (default 60 = C4)
-    int8_t   fine_tune;      // cents offset from root_note (-100..+100)
+    uint32_t magic;
+    uint32_t version;
+    uint32_t sample_data_off;
+    uint32_t sample_data_size;
+    uint32_t sample_desc_off;
+    uint32_t sample_desc_count;
+    uint32_t flow_data_off;
+    uint32_t flow_data_size;  // command count (not bytes)
+    uint32_t dsp_mpro_off;
+    uint32_t dsp_mpro_size;
+    uint32_t dsp_coef_off;
+    uint32_t dsp_coef_size;
+    uint32_t total_ticks;       // total duration in ms
+} afx_header_t;
+```
+
+### Sample Descriptor (`afx_sample_desc_t`)
+
+```c
+#define AFX_FMT_PCM16  0
+#define AFX_FMT_PCM8   1
+#define AFX_FMT_ADPCM  3
+
+#define AFX_LOOP_NONE  0
+#define AFX_LOOP_FWD   1
+#define AFX_LOOP_BIDIR 2
+
+typedef struct {
+    uint32_t source_id;
+    uint8_t  gm_program;
+    uint8_t  format;
+    uint8_t  loop_mode;
+    uint8_t  root_note;
+    int8_t   fine_tune;
     uint8_t  reserved[3];
-    uint32_t sample_off;     // byte offset into sample data blob
-    uint32_t sample_size;    // size of sample data in bytes
-    uint32_t loop_start;     // loop start in samples
-    uint32_t loop_end;       // loop end in samples (0 = end of sample)
-    uint32_t sample_rate;    // original sample rate in Hz
+    uint32_t sample_off;   // byte offset into sample blob
+    uint32_t sample_size;  // bytes
+    uint32_t loop_start;   // byte offset relative to sample_off
+    uint32_t loop_end;     // byte offset relative to sample_off
+    uint32_t sample_rate;
 } afx_sample_desc_t;
 ```
 
-### Opcode (unchanged)
-
-The `afx_opcode_t` format is unchanged. The driver never needs a new opcode type
-because the compiler emits fully-resolved register values.
+### Flow Command Entry (`afx_flow_cmd_t`)
 
 ```c
 typedef struct {
-    uint32_t timestamp;  // absolute time in ms
-    uint8_t  slot;       // AICA voice slot 0-63
-    uint8_t  reg;        // AICA register (AICA_REG_*)
+    uint32_t timestamp;  // absolute ms
+    uint8_t  slot;
+    uint8_t  reg;
     uint16_t pad;
-    uint32_t value;      // pre-encoded register value, ready to write
-} afx_opcode_t;
+    uint32_t value;
+} afx_flow_cmd_t;
 ```
 
 ---
 
-## Opcode Register Reference
+## Naming: "Opcode" vs "Flow Command"
 
-| Constant        | Value | AICA Register                        |
-|-----------------|-------|--------------------------------------|
-| AICA_REG_CTL    | 0x00  | Control / KeyOn / KeyOff / Format    |
-| AICA_REG_SA_HI  | 0x01  | Sample address [19:16]               |
-| AICA_REG_SA_LO  | 0x02  | Sample address [15:0]                |
-| AICA_REG_LSA_HI | 0x03  | Loop start address [19:16]           |
-| AICA_REG_LSA_LO | 0x04  | Loop start address [15:0]            |
-| AICA_REG_LEA_HI | 0x05  | Loop end address [19:16]             |
-| AICA_REG_LEA_LO | 0x06  | Loop end address [15:0]              |
-| AICA_REG_D2R_D1R| 0x07  | Decay 2 rate / Decay 1 rate          |
-| AICA_REG_EGH_RR | 0x08  | EG hold / Release rate               |
-| AICA_REG_AR_SR  | 0x09  | Attack rate / Sustain rate           |
-| AICA_REG_LNK_DL | 0x0A  | Loop link / Decay level              |
-| AICA_REG_FNS_OCT| 0x0C  | Fine frequency step / Octave         |
-| AICA_REG_TOT_LVL| 0x0D  | Total level (volume)                 |
-| AICA_REG_PAN_VOL| 0x0E  | Panning / Volume                     |
+Is "opcode" misleading here? Slightly, yes.
+
+Reason:
+- "Opcode" suggests an interpreted VM instruction set
+- This stream is actually direct hardware register commands with timestamps
+
+Preferred term in docs:
+- flow command
+
+Compatibility note:
+- Use `afx_flow_cmd_t` in code and docs
 
 ---
 
-## How the Compiler Resolves Everything
+## AICA Register Command Targets
 
-### Sample Addresses
+(Previously titled "Opcode Register Reference")
 
-At compile time, `midi2afx` knows:
-- `sample_desc[i].sample_off` — offset of each sample within the sample blob
-- The ARM7 driver places the sample blob at `WAVE_RAM_BASE + sample_data_off`
-
-So the compiler emits pre-adjusted absolute Wave RAM addresses directly into
-SA_HI/SA_LO/LSA_*/LEA_* opcodes. The driver applies no fixup at all — it writes
-verbatim values. *(This is a change from v1 where the driver added the base offset.)*
-
-### Loop Points
-
-If the sample has `loop_mode != AFX_LOOP_NONE`, the compiler emits:
-1. `LSA_HI` / `LSA_LO` — loop start address (absolute Wave RAM)
-2. `LEA_HI` / `LEA_LO` — loop end address (absolute Wave RAM)
-3. CTL with the loop bit set in addition to KYON
-
-### Pitch / Frequency
-
-For a given MIDI note, the compiler computes the FNS_OCT value using:
-- `sample_desc[i].root_note` and `fine_tune`
-- The target MIDI note
-- Standard AICA frequency formula: `FNS = (f_target / f_root) * 1024`, clipped to [0,1023], OCT computed from octave distance
-
-All of this is arithmetic the ARM7 should not waste cycles on.
-
-### Envelope
-
-Default AR/D1R/D2R/RR/DL for each program are baked into the opcode stream.
-MIDI CC 73 (Attack) and CC 72 (Release) adjustments are resolved into absolute
-AICA envelope register values at compile time as they are encountered in the event
-stream.
-
-### Volume / Pan
-
-MIDI velocity → AICA total level conversion and MIDI pan CC → AICA PAN_VOL
-encoding are computed by the compiler and written directly into the opcode stream.
-
-### DSP
-
-If the song uses reverb/chorus, the compiler embeds the DSP microprogram and
-coefficient tables directly in the `.afx` file. The driver uploads these to AICA
-DSP memory on song start (the one non-trivial initialization step) and then
-never touches DSP again.
+| Constant        | Value | AICA Register                         |
+|----------------|-------|---------------------------------------|
+| AICA_REG_CTL    | 0x00  | Control / KeyOn / KeyOff / format     |
+| AICA_REG_SA_HI  | 0x01  | Sample address [23:16]                |
+| AICA_REG_SA_LO  | 0x02  | Sample address [15:0]                 |
+| AICA_REG_LSA_HI | 0x03  | Loop start [23:16]                    |
+| AICA_REG_LSA_LO | 0x04  | Loop start [15:0]                     |
+| AICA_REG_LEA_HI | 0x05  | Loop end [23:16]                      |
+| AICA_REG_LEA_LO | 0x06  | Loop end [15:0]                       |
+| AICA_REG_D2R_D1R| 0x07  | Decay 2 / Decay 1                     |
+| AICA_REG_EGH_RR | 0x08  | EG hold / Release                     |
+| AICA_REG_AR_SR  | 0x09  | Attack / Sustain                      |
+| AICA_REG_LNK_DL | 0x0A  | Link / Decay level                    |
+| AICA_REG_FNS_OCT| 0x0C  | Frequency / Octave                    |
+| AICA_REG_TOT_LVL| 0x0D  | Total level                           |
+| AICA_REG_PAN_VOL| 0x0E  | Pan / Volume                          |
 
 ---
 
-## ARM7 Driver Changes (minimal)
+## Runtime Address Model (Current)
 
-The v1 driver applied a sample address fixup in `execute_opcode()`:
+The command stream stores blob-local sample offsets in SA command values.
+At runtime, ARM7 adds `sample_base` and writes split SA_HI/SA_LO register data.
 
-```c
-// v1 (to be removed)
-if (reg == AICA_REG_SA_LO || reg == AICA_REG_SA_HI) {
-    val += (IPC_STATUS->cmd_arg + SONG_HEADER->sample_data_off);
-}
-```
+So current behavior is:
+- host emits blob-local offsets
+- driver applies one address fixup for SA writes
 
-In v2, the compiler pre-bakes absolute addresses, so this fixup is **removed**.
-
-The only new driver responsibility is uploading any embedded DSP data at song start:
-
-```c
-// pseudo-code for PLAY handler
-if (header->dsp_mpro_size > 0)
-    memcpy(AICA_DSP_MPRO, file_base + header->dsp_mpro_off, header->dsp_mpro_size);
-if (header->dsp_coef_size > 0)
-    memcpy(AICA_DSP_COEF, file_base + header->dsp_coef_off, header->dsp_coef_size);
-// then start the stream interpreter loop as before
-```
-
-Everything else in the driver is unchanged.
+This is intentional in the current implementation.
 
 ---
 
-## Implementation Plan
+## SH4/ARM7 IPC Model (Current)
 
-### Step 1 — `include/afx/afx.h`
-- Add `afx_header_v2_t`
-- Add `afx_sample_desc_t` with format/loop/root note/fine tune/loop points
-- Keep `afx_opcode_t` unchanged
-- Keep old v1 structs with a deprecation comment for backward compat during transition
+IPC transport is now a ring queue in AICA RAM.
 
-### Step 2 — `src/tools/midi2afx.c`
-- Replace source map write with sample descriptor table write
-- Pre-resolve all sample addresses (base + sample_off) at write time; no runtime fixup
-- Emit LSA_*/LEA_* opcodes when sample has loop points
-- Compute FNS_OCT from MIDI note + root_note + fine_tune
-- Encode velocity → TL, pan → PAN_VOL at emit time
-- Write v2 header with correct section offsets
+Control/status block layout:
+- `afx_ipc_status_t` (head/tail/status/tick/volume)
+- command queue (`afx_ipc_cmd_t[]`)
+- `afx_player_state_t`
 
-### Step 3 — `src/tools/afx_info.c`
-- Decode `afx_header_v2_t` / `afx_sample_desc_t`
-- Show loop points, root note, format per sample
-- Validate pre-baked sample addresses against sample blob bounds
+Queue characteristics:
+- fixed-size circular buffer
+- SH4 is producer (`q_head`)
+- ARM7 is consumer (`q_tail`)
+- poll interval ~1ms, with drain-until-empty behavior
 
-### Step 4 — `src/driver/aica_driver.c`
-- Remove SA_LO/SA_HI fixup from `execute_opcode()`
-- Add DSP memory upload in PLAY handler
-- No other changes required
-
-### Step 5 — Python emulator (`src/tools/afx_emulator.py`)
-- Update header parsing for v2 layout
-- Remove sample address fixup (addresses are now absolute)
-- Apply loop points from descriptor
-
-### Step 6 — Music volume control (`src/driver/aica_driver.c`)
-The driver is permitted one runtime operation on the opcode stream: scaling playback volume in response to a music volume setting from the SH4.
-
-- Add a `music_volume` field (0–255) to the IPC status struct, settable via a new `SET_MUSIC_VOL` IPC command from the SH4
-- In `execute_opcode()`, when writing `AICA_REG_TOT_LVL` (total level), scale the pre-baked value by `music_volume / 255` before writing to hardware
-- All other register writes remain verbatim — only TL is affected
-- Default `music_volume = 255` (full volume, no scaling)
-
-This keeps the driver dumb: it does not interpret the music, it only applies a single global scalar to voice levels.
+Supported commands:
+- PLAY
+- STOP
+- PAUSE
+- VOLUME
+- SEEK
 
 ---
 
-## Non-Goals (by design)
+## SH4 Dynamic Memory Ownership (Current)
 
-- The ARM7 driver will **not** decode instrument banks, resolve GM program numbers, or perform voice allocation at runtime. All of this happens in the compiler.
-- The ARM7 driver will **not** compute pitch ratios, envelope curves, or volume curves at runtime. All register values are pre-encoded.
-- There is **no** scripting, no bytecode, no expression evaluation in the driver. It is purely a timestamped register write sequencer.
+SH4 owns dynamic AICA RAM allocation.
+
+Implemented host helpers:
+- `afx_mem_reset`
+- `afx_mem_alloc`
+- `afx_mem_write`
+- `afx_upload_afx`
+- `afx_upload_and_init_firmware`
+
+Firmware upload/init behavior:
+- upload firmware at requested SPU address
+- write 32-byte aligned dynamic-base marker immediately after firmware size
+- clear queue/player/status control blocks
+- initialize allocator cursor to computed dynamic base
+
+---
+
+## Family Playback Policies (Current)
+
+Family policy metadata is generated into family map entries and consumed by converter.
+
+Applied during conversion:
+- note-off trim (`policy_note_trim_ms`) with min hold (`policy_min_hold_ms`)
+- velocity shaping (`policy_velocity_gamma`, `policy_velocity_gain`)
+- release-rate bias (`policy_release_bias`)
+
+This affects flow-command generation, not driver complexity.
+
+---
+
+## What Has Been Done
+
+1. Stable header/descriptor/stream schema implemented in code
+2. DSP payload embedding and driver upload path implemented
+3. Global runtime music volume scaling on TOT_LVL implemented
+4. SH4-managed dynamic AICA upload helpers implemented
+5. Firmware upload/init helper with dynamic-base marker implemented
+6. IPC ring queue mechanism implemented (replacing single mailbox fields)
+7. Queue resized to a compact practical default (`0x0400`)
+8. Family patch workflow and policy-aware conversion implemented
+9. Coverage reports for family patch mapping implemented
+
+---
+
+## What Still Needs To Be Done
+
+1. Queue robustness instrumentation:
+- optional overflow counter / dropped-command counter
+- optional watermark metrics for tuning queue size on hardware
+
+2. Queue API ergonomics:
+- expose explicit success/failure return path to callers for enqueue operations
+- optional timeout policy hooks on SH4 side
+
+3. Emulator alignment:
+- verify Python emulator behavior against latest queue/layout and policy changes
+- add regression tests for seek + policy timing interactions
+
+4. Documentation consolidation:
+- sync README and this design doc whenever constants/struct fields change
+- optionally auto-generate constant tables from headers
+
+---
+
+## Non-Goals (Still True)
+
+- ARM7 does not perform instrument-bank decoding
+- ARM7 does not do runtime pitch/envelope synthesis logic
+- ARM7 does not run an interpreted script VM
+- Runtime stays a timestamped register-command sequencer
