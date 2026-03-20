@@ -23,14 +23,14 @@ The result is a flow-command architecture where the runtime is deterministic and
 
 ## Driver Memory Map (SPU RAM)
 
-Current layout constants (from `include/afx/afx.h`):
+Current layout constants (from `include/afx/common.h` and `driver.h`):
 
 - `AFX_MEM_CLOCKS = 0x001FFFE0`
-- `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (32-byte status block)
-- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (0x0400 queue block)
-- `AFX_PLAYER_STATE_ADDR = 0x001FFB60` (size/alignment-derived from `afx_player_state_t`, currently 80 bytes)
+- `AFX_IPC_STATUS_ADDR = 0x001FFFE0` (Status block calculation base)
+- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBE0` (32-byte aligned base)
+- `AFX_PLAYER_STATE_ADDR = 0x001FFB60` (80-byte state block)
 
-The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place from the queued `PLAY` command argument and keeps runtime state in `afx_player_state_t`.
+The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_player_state_t` at a fixed high-memory address to avoid stack usage.
 
 ```mermaid
 graph TD
@@ -41,11 +41,11 @@ graph TD
 
         subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFB60 - 0x001FFFE0"]
             direction TB
-            QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
+            STATUS["<b>IPC Status Struct</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(afx_ipc_status_t)"]
+            QUEUE["<b>Command Queue</b><br/>0x001FFBE0 - 0x001FFFDF<br/>(0x0400 bytes)"]
             PLAYER["<b>Player State</b><br/>0x001FFB60 - 0x001FFBAF<br/>(afx_player_state_t, 80 bytes)"]
-            STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t)"]
+            STATUS --- QUEUE
             QUEUE --- PLAYER
-            PLAYER --- STATUS
         end
 
         CLOCKS --- IPC_BLOCK
@@ -60,14 +60,11 @@ graph TD
 ## Binary Layout
 
 ```
-[afx_header_t]             - compact format header (version, section table info)
-[afx_section_entry_t[]]    - typed section directory
+[afx_header_t]             - 20-byte lean header
+[afx_section_entry_t[]]    - implicit directory table (immediately follows header)
 [FLOW]                     - array of afx_cmd_t
 [SDES]                     - array of afx_sample_desc_t
-[SDAT]                     - raw ADPCM/PCM bytes, back-to-back
-[DSPM]                     - optional DSP microprogram payload
-[DSPC]                     - optional DSP coefficient payload
-[META]                     - optional metadata payload
+[SDAT]                     - raw ADPCM/PCM bytes
 ```
 
 All section offsets are relative to file start.
@@ -85,20 +82,18 @@ All section offsets are relative to file start.
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    uint32_t header_size;
     uint32_t section_count;
-    uint32_t section_table_off;
-    uint32_t section_table_size;
     uint32_t total_ticks;      // total duration in ms
     uint32_t flags;
 } afx_header_t;
 
+/* Section table immediately follows header at offset 20 */
 typedef struct {
     uint32_t id;               // AFX_SECT_* fourcc
     uint32_t offset;           // file-relative byte offset
     uint32_t size;             // bytes
     uint32_t count;            // entry count for array sections
-    uint32_t align;            // alignment (typically 4)
+    uint32_t align;            // alignment (4 or 32)
     uint32_t flags;
 } afx_section_entry_t;
 ```

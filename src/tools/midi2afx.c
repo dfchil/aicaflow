@@ -5,7 +5,8 @@
 #include <stdbool.h>
 #include <dirent.h>
 #include <ctype.h>
-#include <afx/afx.h>
+#include <afx/driver.h>
+#include <afx/host.h>
 #include <math.h>
 /**
  * AICA Flow Integrated Tool (C23)
@@ -409,29 +410,48 @@ static void pack_file(const char *path, uint8_t program, uint32_t source_id, FIL
  * They are converted to file-relative offsets once section layout is finalized.
  */
 static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t program,
-                                  uint8_t ar, uint8_t rr,
+                                  uint8_t ar, uint8_t d1r, uint8_t d2r, uint8_t rr, uint8_t dl,
                                   uint8_t velocity, uint8_t midi_pan,
                                   afx_cmd_t *cmds, uint32_t *cmd_idx) {
     patch_info_t p = instrument_bank[program];
     if (p.size == 0) return;
 
-    /* Sample address: SDAT-local offset in both HI and LO flow commands */
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, p.addr };
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr };
+    /* Bit 15: Key On, Bit 9: Loop, Bits [8:7]: Format, Bits [6:0]: SA_HI */
+    uint32_t loop_bit = (sample_descs[program].loop_mode != AFX_LOOP_NONE) ? (1u << 9) : 0;
+    uint32_t format_bits = (uint32_t)(p.format & 0x3) << 7;
+    uint32_t ctl_val = (1u << 15) | loop_bit | format_bits | (p.addr >> 16);
 
-    /* Loop registers: only emit when the descriptor has defined loop points */
+    /* Sample address: SDAT-local offset in both HI and LO flow commands */
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, ctl_val };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr & 0xFFFF };
+
+    /* Loop registers: only emit when the descriptor has defined loop points.
+     * These are 16-bit relative offsets from the Sample Start (SA). 
+     * Since the ARM7 calculates absolute SA, we can pre-calculate these offsets here. */
     afx_sample_desc_t *desc = &sample_descs[program];
     if (desc->loop_mode != AFX_LOOP_NONE && desc->loop_end > 0) {
-        uint32_t lsa = p.addr + desc->loop_start;
-        uint32_t lea = p.addr + desc->loop_end;
-        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA_HI, 0, lsa };
-        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA_LO, 0, lsa };
-        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA_HI, 0, lea };
-        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA_LO, 0, lea };
+        /* AICA loop registers (LSA/LEA) are 16-bit relative to SA.
+         * The hardware automatically adds SA to these. */
+        uint32_t lsa = desc->loop_start;
+        uint32_t lea = desc->loop_end;
+
+        /* Clip/Warn if offsets exceed 64k (16-bit limit) */
+        if (lsa > 0xFFFF) lsa = 0xFFFF;
+        if (lea > 0xFFFE) lea = 0xFFFE; /* 0xFFFF is reserved/invalid for LEA */
+
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA, 0, lsa };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA, 0, lea };
     }
 
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_AR_SR,  0, (ar << 8) | 0 };
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_EGH_RR, 0, rr };
+    /* ADSR Pre-calculated Bitfields:
+     * D2R_D1R: D1R (Bits 12:8), AR (Bits 4:0) --> Actually [docs/aica_technical_reference.md] says D1R at bit 8, AR at bit 0.
+     * EGH_RR:  D2R (Bits 12:8), DL (Bits 7:3), RR (Bits 4:0)
+     */
+    uint32_t d2r_d1r_val = ((uint32_t)(d1r & 0x1F) << 8) | (ar & 0x1F);
+    uint32_t egh_rr_val  = ((uint32_t)(d2r & 0x1F) << 8) | ((uint32_t)(dl & 0x1F) << 3) | (rr & 0x1F);
+
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_D2R_D1R, 0, d2r_d1r_val };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_EGH_RR,  0, egh_rr_val };
 
     /* Velocity -> Total Level: TL 0=loudest, 127=nearly silent. Invert vel. */
     cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_TOT_LVL, 0, (uint32_t)(127u - velocity) };
@@ -512,10 +532,7 @@ int main(int argc, char **argv) {
     afx_header_t header = {
         .magic = AICAF_MAGIC,
         .version = AICAF_VERSION,
-        .header_size = sizeof(afx_header_t),
         .section_count = 0,
-        .section_table_off = sizeof(afx_header_t),
-        .section_table_size = 0,
         .total_ticks = 0,
         .flags = 0,
     };
@@ -726,12 +743,12 @@ int main(int argc, char **argv) {
                         uint8_t root = sample_descs[prog].root_note ? sample_descs[prog].root_note : 60;
                         float ratio = midi_note_to_freq(note) / midi_note_to_freq(root);
                         int rel = clamp_int((int)channel_release[chan] + (int)policy.release_bias, 0, 31);
+                        afx_sample_desc_t *desc = &sample_descs[prog];
                         write_patch_flow_cmds(current_ms, slot, prog,
-                                              channel_attack[chan], (uint8_t)rel,
+                                              channel_attack[chan], (uint8_t)15, (uint8_t)15, (uint8_t)rel, (uint8_t)0,
                                               vel_shaped, channel_pan[chan],
                                               flow_cmd_buffer, &flow_cmd_count);
                         flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ current_ms, slot, AICA_REG_FNS_OCT, 0, aica_pitch_convert(ratio) };
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ current_ms, slot, AICA_REG_CTL, 0, (1 << 15) | (instrument_bank[prog].format << 11) };
                         slot_note_on_ms[slot] = current_ms;
                         slot_note_on_prog[slot] = prog;
                         slot_active[slot] = true;
@@ -748,7 +765,9 @@ int main(int argc, char **argv) {
                             slot_active[slot] = false;
                         }
                         if (off_ms > max_timestamp) max_timestamp = off_ms;
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ off_ms, slot, AICA_REG_CTL, 0, (1 << 14) | (instrument_bank[prog].format << 11) };
+                        /* Emit Key Off (Bit 14) via SA_HI register */
+                        uint32_t sa_hi_val = (instrument_bank[prog].addr >> 16) & 0x7F;
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ off_ms, slot, AICA_REG_SA_HI, 0, (1u << 14) | sa_hi_val };
                     }
                 } else if(status < 0xF0) { fgetc(f_mid); if(type != 0xD0) fgetc(f_mid); }
                 else if(status == 0xFF) { 
@@ -779,7 +798,7 @@ int main(int argc, char **argv) {
     afx_section_entry_t sections[3];
     uint32_t section_count = 0;
     uint32_t cursor = sizeof(afx_header_t) + (uint32_t)(3 * sizeof(afx_section_entry_t));
-    cursor = AFX_ALIGN4(cursor);
+    cursor = AFX_ALIGN32(cursor);
 
     uint32_t flow_bytes = flow_cmd_count * (uint32_t)sizeof(afx_cmd_t);
     sections[section_count++] = (afx_section_entry_t){
@@ -787,10 +806,10 @@ int main(int argc, char **argv) {
         .offset = cursor,
         .size = flow_bytes,
         .count = flow_cmd_count,
-        .align = 4,
+        .align = 32,
         .flags = 0,
     };
-    cursor = AFX_ALIGN4(cursor + flow_bytes);
+    cursor = AFX_ALIGN32(cursor + flow_bytes);
 
     uint32_t sdes_bytes = source_count * (uint32_t)sizeof(afx_sample_desc_t);
     sections[section_count++] = (afx_section_entry_t){
@@ -798,32 +817,34 @@ int main(int argc, char **argv) {
         .offset = cursor,
         .size = sdes_bytes,
         .count = source_count,
-        .align = 4,
+        .align = 32,
         .flags = 0,
     };
-    cursor = AFX_ALIGN4(cursor + sdes_bytes);
+    cursor = AFX_ALIGN32(cursor + sdes_bytes);
 
     sections[section_count++] = (afx_section_entry_t){
         .id = AFX_SECT_SDAT,
         .offset = cursor,
         .size = sample_data_size,
         .count = 0,
-        .align = 4,
+        .align = 32,
         .flags = 0,
     };
 
     header.section_count = section_count;
-    header.section_table_off = sizeof(afx_header_t);
-    header.section_table_size = section_count * (uint32_t)sizeof(afx_section_entry_t);
     header.total_ticks = max_timestamp;
+
+    fseek(f_out, 0, SEEK_SET);
+    fwrite(&header, sizeof(header), 1, f_out);
+    fwrite(sections, sizeof(afx_section_entry_t), section_count, f_out);
 
     /* Convert SDAT-local addresses to file-relative offsets for ARM7 runtime. */
     uint32_t sdat_file_off = sections[2].offset;
     for (uint32_t i = 0; i < flow_cmd_count; i++) {
         uint8_t reg = flow_cmd_buffer[i].reg;
-        if (reg == AICA_REG_SA_HI || reg == AICA_REG_SA_LO ||
-            reg == AICA_REG_LSA_HI || reg == AICA_REG_LSA_LO ||
-            reg == AICA_REG_LEA_HI || reg == AICA_REG_LEA_LO) {
+        /* Only SA_HI and SA_LO carry absolute-relative offsets.
+           LSA and LEA are pre-calculated relative to SA. */
+        if (reg == AICA_REG_SA_HI || reg == AICA_REG_SA_LO) {
             flow_cmd_buffer[i].value += sdat_file_off;
         }
     }
@@ -831,10 +852,7 @@ int main(int argc, char **argv) {
         s_entries[i].sample_off += sdat_file_off;
     }
 
-    fseek(f_out, 0, SEEK_SET);
-    fwrite(&header, sizeof(header), 1, f_out);
-    fwrite(sections, sizeof(afx_section_entry_t), section_count, f_out);
-
+    /* Padding to first section offset (usually 0x60) */
     long pos = ftell(f_out);
     while ((uint32_t)pos < sections[0].offset) {
         fputc(0, f_out);
@@ -843,7 +861,7 @@ int main(int argc, char **argv) {
 
     fwrite(flow_cmd_buffer, sizeof(afx_cmd_t), flow_cmd_count, f_out);
     pos = ftell(f_out);
-    while (((uint32_t)pos & 3u) != 0u) {
+    while ((uint32_t)pos < sections[1].offset) {
         fputc(0, f_out);
         pos++;
     }

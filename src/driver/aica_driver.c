@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
-#include <afx/afx.h>
+#include <afx/driver.h>
+#include <afx/host.h>
 
 /**
  * AICA Flow ARM7 Core Driver (Standard C99/C11)
@@ -160,13 +161,17 @@ static inline void execute_cmd(const afx_cmd_t *cmd) {
     PLAYER_STATE->reg_ptr = (uint32_t)(0x00800000 + (cmd->slot * 0x80) + (cmd->reg * 4));
     PLAYER_STATE->reg_val = cmd->value;
 
-    /* SA_LO and SA_HI contain file-relative offsets from .afx start. */
+    /* SA_LO/HI contain absolute SPU addresses resolved from file-relative offsets. */
     if (cmd->reg == AICA_REG_SA_LO) {
         PLAYER_STATE->resolved_addr = afx_resolve_file_offset(PLAYER_STATE->afx_base, cmd->value);
         PLAYER_STATE->reg_val = PLAYER_STATE->resolved_addr & 0xFFFF;
     } else if (cmd->reg == AICA_REG_SA_HI) {
         PLAYER_STATE->resolved_addr = afx_resolve_file_offset(PLAYER_STATE->afx_base, cmd->value);
-        PLAYER_STATE->reg_val = (PLAYER_STATE->resolved_addr >> 16) & 0xFF;
+        /* Bits [22:16] of absolute address go into play_ctrl Bits [6:0] */
+        uint32_t val = (PLAYER_STATE->resolved_addr >> 16) & 0x7F;
+        /* Preserve existing flags (KeyOn/Loop/Format) if needed, 
+           but usually the sequencer writes the whole control word. */
+        PLAYER_STATE->reg_val = val;
     } else if (cmd->reg == AICA_REG_TOT_LVL) {
         PLAYER_STATE->reg_val = g_tl_scale_lut[PLAYER_STATE->reg_val & 0xFFu];
     }

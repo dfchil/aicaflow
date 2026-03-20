@@ -45,16 +45,13 @@ class AFXEmulator:
     def render(self, output_wav):
         print(f"Simulating AFX Hardware Playback: {self.afx_path}")
         with open(self.afx_path, 'rb') as f:
-            # Parse current header: 8 x uint32 = 32 bytes
-            hdr_bin = f.read(32)
-            if len(hdr_bin) < 32:
+            # Parse lean header (20 bytes): Magic(4), Version(4), SecCount(4), TotalTicks(4), Flags(4)
+            hdr_bin = f.read(20)
+            if len(hdr_bin) < 20:
                 print("Error: Invalid AFX header size")
                 return
 
-            (magic, ver,
-             header_size, section_count,
-             section_table_off, section_table_size,
-             ticks, flags) = struct.unpack('<IIIIIIII', hdr_bin)
+            magic, ver, section_count, ticks, flags = struct.unpack('<IIIII', hdr_bin)
 
             if magic != AFX_MAGIC:
                 print(f"Error: Invalid Magic 0x{magic:08X}")
@@ -63,16 +60,10 @@ class AFXEmulator:
                 print(f"Error: Unsupported AFX version {ver}")
                 return
 
-            f.seek(section_table_off)
-            section_bin = f.read(section_table_size)
-            if len(section_bin) < section_table_size:
-                print("Error: Invalid section table")
-                return
-
+            # Section table follows immediately after 20-byte header
             sections = []
             for i in range(section_count):
-                base = i * 24
-                entry = section_bin[base:base+24]
+                entry = f.read(24)
                 if len(entry) < 24:
                     break
                 sid, off, size, count, align, sflags = struct.unpack('<IIIIII', entry)
@@ -109,11 +100,12 @@ class AFXEmulator:
                 })
 
             # Map blob-local offset -> (wav_path, descriptor)
+            # Sample offset in descriptor is still section-relative.
             offset_to_entry = {}
-            for desc in descs:
-                path = self.wavetable_map.get(desc['source_id'])
+            for d in descs:
+                path = self.wavetable_map.get(d['source_id'])
                 if path:
-                    offset_to_entry[desc['sample_off']] = (path, desc)
+                    offset_to_entry[d['sample_off']] = (path, d)
 
             # Pre-load required waveforms
             loaded_waveforms = {}
@@ -123,21 +115,20 @@ class AFXEmulator:
                     if pcm is not None:
                         loaded_waveforms[path] = (pcm, rate)
 
-            # Load flow commands — st_sz is an entry count
-            # afx_cmd: timestamp(4), slot(1), reg(1), pad(2), value(4) = 12 bytes
-            f.seek(st_off)
+            # Load flow commands — count is from section header
+            f.seek(flow['off'])
             flow_cmds = []
-            for _ in range(st_sz):
+            for _ in range(flow['count']):
                 op_bin = f.read(12)
                 if len(op_bin) < 12: break
                 ts, slot, reg, pad, val = struct.unpack('<IBBHI', op_bin)
                 flow_cmds.append({'ts': ts, 'slot': slot, 'reg': reg, 'val': val})
 
         # Simulation Initialization
-        # Duration in samples based on max_timestamp in header
-        total_samples = int((ticks / 1000.0) * SAMPLE_RATE) + (SAMPLE_RATE // 2) 
+        # Duration in samples calculated from max_timestamp (ticks)
+        total_samples = int((ticks / 1000.0) * SAMPLE_RATE) + (SAMPLE_RATE // 2)
         mix_buffer = np.zeros(total_samples, dtype=np.float32)
-        
+
         # Hardware Racks (64 Slots)
         slots = []
         for i in range(64):
@@ -151,7 +142,8 @@ class AFXEmulator:
                 'vol': 1.0,
                 'loop_mode': 0,
                 'loop_start_samp': 0,
-                'loop_end_samp': 0
+                'loop_end_samp': 0,
+                'sa_base': 0
             })
 
         # Render process
@@ -171,13 +163,46 @@ class AFXEmulator:
                 reg = op['reg']
                 val = op['val']
                 
-                if reg == 0x00: # CTL / KYON
+                # Register Mappings (New Layout)
+                # 0x00: SA_HI & CTL (Bit 15: KYON, Bit 14: KYOFF)
+                # 0x01: SA_LO
+                # 0x02: LSA
+                # 0x03: LEA
+                if reg == 0x00: # SA_HI & CTL
                     if val & (1 << 15): # KEY ON
                         s['active'] = True
                         s['pos'] = 0.0
                     elif val & (1 << 14): # KEY OFF
                         s['active'] = False
-                elif reg == 0x02: # SA_LO — blob-local offset identifies the sample
+                    
+                    # Track Sample Address (Bits 0-6 of SA_HI | Bits 0-15 of SA_LO)
+                    s['sa_base'] = (s['sa_base'] & 0x00FFFF) | ((val & 0x7F) << 16)
+                elif reg == 0x01: # SA_LO
+                    s['sa_base'] = (s['sa_base'] & 0x7F0000) | (val & 0xFFFF)
+                    
+                    # Logic to identify which sample we are playing based on the address
+                    # The ARM driver resolves file-relative, so we check our map
+                    entry = offset_to_entry.get(s['sa_base'])
+                    if entry:
+                        path, d = entry
+                        s['program'] = d['gm_program']
+                        s['orig_rate'] = d['sample_rate']
+                        s['loop_mode'] = d['loop_mode']
+                        # Loop points in desc are byte offsets relative to sample start.
+                        # Since LSA/LEA are now pre-calculated into the sequence, 
+                        # we prefer the descriptor as truth for the emulator logic.
+                        fmt = d['format']
+                        bps = 2.0 if fmt == 0 else (1.0 if fmt == 1 else 0.5)
+                        s['loop_start_samp'] = int(d['loop_start'] / bps)
+                        s['loop_end_samp']   = int(d['loop_end']   / bps) if d['loop_end'] > 0 else 0
+                        if path in loaded_waveforms:
+                            s['pcm'], _ = loaded_waveforms[path]
+                elif reg == 0x02: # LSA (Rel to SA)
+                    # We can use this to override descriptor if needed
+                    pass
+                elif reg == 0x03: # LEA (Rel to SA)
+                    pass
+                elif reg == 0x0C: # FNS_OCT
                     entry = offset_to_entry.get(val)
                     if entry:
                         path, desc = entry

@@ -3,10 +3,11 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include <afx/afx.h>
+#include <afx/driver.h>
+#include <afx/host.h>
 
 static void test_struct_layout(void) {
-    assert(sizeof(afx_header_t) == 32);
+    assert(sizeof(afx_header_t) == 20);
     assert(sizeof(afx_section_entry_t) == 24);
     assert(sizeof(afx_sample_desc_t) == 32);
     assert(sizeof(afx_cmd_t) == 12);

@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <afx/afx.h>
+#include <afx/driver.h>
+#include <afx/host.h>
 
 /**
  * AICA Flow Information Tool (C23)
@@ -30,13 +31,10 @@ static const char *sample_format_name(uint32_t format) {
 reg_stat_t stats[] = {
     { 0xFE,             "KYON",     0 },
     { 0xFD,             "KYOFF",    0 },
-    { AICA_REG_CTL,     "CTL",      0 },
-    { AICA_REG_SA_HI,   "SA_HI",    0 },
+    { AICA_REG_SA_HI,   "SA_HI/CTL", 0 },
     { AICA_REG_SA_LO,   "SA_LO",    0 },
-    { AICA_REG_LSA_HI,  "LSA_HI",   0 },
-    { AICA_REG_LSA_LO,  "LSA_LO",   0 },
-    { AICA_REG_LEA_HI,  "LEA_HI",   0 },
-    { AICA_REG_LEA_LO,  "LEA_LO",   0 },
+    { AICA_REG_LSA,      "LSA",      0 },
+    { AICA_REG_LEA,      "LEA",      0 },
     { AICA_REG_D2R_D1R, "D2R_D1R",  0 },
     { AICA_REG_EGH_RR,  "EGH_RR",   0 },
     { AICA_REG_AR_SR,   "AR_SR",    0 },
@@ -86,29 +84,37 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (head.section_count == 0 || head.section_table_size == 0) {
+    if (head.section_count == 0) {
         fprintf(stderr, "Error: Missing section table.\n");
         fclose(f);
         return 1;
     }
 
-    afx_section_entry_t *sections = malloc(head.section_table_size);
+    uint32_t table_size = head.section_count * sizeof(afx_section_entry_t);
+    afx_section_entry_t *sections = malloc(table_size);
     if (!sections) {
         fprintf(stderr, "Error: Out of memory reading section table.\n");
         fclose(f);
         return 1;
     }
-    fseek(f, head.section_table_off, SEEK_SET);
-    if (fread(sections, 1, head.section_table_size, f) != head.section_table_size) {
+    fseek(f, sizeof(afx_header_t), SEEK_SET);
+    if (fread(sections, 1, table_size, f) != table_size) {
         fprintf(stderr, "Error: Could not read section table.\n");
         free(sections);
         fclose(f);
         return 1;
     }
 
-    const afx_section_entry_t *s_flow = find_section(sections, head.section_count, AFX_SECT_FLOW);
-    const afx_section_entry_t *s_sdes = find_section(sections, head.section_count, AFX_SECT_SDES);
-    const afx_section_entry_t *s_sdat = find_section(sections, head.section_count, AFX_SECT_SDAT);
+    const afx_section_entry_t *s_flow = NULL;
+    const afx_section_entry_t *s_sdes = NULL;
+    const afx_section_entry_t *s_sdat = NULL;
+
+    for (uint32_t i = 0; i < head.section_count; i++) {
+        if (sections[i].id == AFX_SECT_FLOW) s_flow = &sections[i];
+        if (sections[i].id == AFX_SECT_SDES) s_sdes = &sections[i];
+        if (sections[i].id == AFX_SECT_SDAT) s_sdat = &sections[i];
+    }
+
     if (!s_flow || !s_sdes || !s_sdat) {
         fprintf(stderr, "Error: Missing required section(s).\n");
         free(sections);
@@ -138,6 +144,9 @@ int main(int argc, char **argv) {
     printf("Magic:      0x%08X\n", head.magic);
     printf("Version:    %u\n", head.version);
     printf("Sections:   %u\n", head.section_count);
+    printf("FLOW Offset: 0x%02X (%u)\n", flow_data_off, flow_data_off);
+    printf("SDES Offset: 0x%02X (%u)\n", source_map_off, source_map_off);
+    printf("SDAT Offset: 0x%02X (%u)\n", sample_data_off, sample_data_off);
     printf("Samples:    %u bytes (%.1f%%) (at offset 0x%X)\n", sample_data_size, sample_pct, sample_data_off);
     printf("Flow Cmds:  %u entries, %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_bytes, flow_cmd_pct, flow_data_off);
     printf("--------------------------------------\n");
@@ -171,9 +180,11 @@ int main(int argc, char **argv) {
                 }
 
                 bool found = false;
-                if (cmd.reg == AICA_REG_CTL) {
-                    uint32_t control_bits = cmd.value & ((1 << 15) | (1 << 14));
-                    if (control_bits == (1 << 15)) {
+                /* Note: In the new architecture, Key On/Off is handled by AICA_REG_SA_HI (Index 0)
+                   Bit 15: KYON, Bit 14: KYOFF */
+                if (cmd.reg == AICA_REG_SA_HI) {
+                    uint32_t control_bits = cmd.value & ((1u << 15) | (1u << 14));
+                    if (control_bits & (1u << 15)) {
                         stats[0].count++; /* KYON */
                         found = true;
                         if (descs && addr_counts && slot_has_addr[cmd.slot]) {
@@ -186,22 +197,23 @@ int main(int argc, char **argv) {
                                 }
                             }
                         }
-                    } else if (control_bits == (1 << 14)) {
-                        stats[1].count++; found = true; /* KYOFF */
-                    } else {
-                        stats[2].count++; found = true; /* CTL other */
+                    } else if (control_bits & (1u << 14)) {
+                        stats[1].count++; /* KYOFF */
+                        found = true;
                     }
+                    /* Always count the SA_HI/CTL register write itself in stats[2] */
+                    stats[2].count++;
                 } else {
                     for (int j = 3; stats[j].reg != 0xFF; j++) {
                         if (stats[j].reg == cmd.reg) { stats[j].count++; found = true; break; }
                     }
                 }
-                if (!found) stats[15].count++;
+                if (!found && cmd.reg != AICA_REG_SA_HI) stats[12].count++; /* Index 12 is "OTHER" */
             }
         }
 
         printf("Flow Command Register Distribution:\n");
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < 13; i++) {
             if (stats[i].count > 0) {
                 if (stats[i].reg != 0xFF && stats[i].reg != 0xFE && stats[i].reg != 0xFD)
                     printf("  [0x%02X] %-10s : %u\n", stats[i].reg, stats[i].name, stats[i].count);

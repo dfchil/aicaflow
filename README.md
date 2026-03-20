@@ -6,12 +6,11 @@ The current `.afx` format is stable and single-track for this project. The toolc
 
 ## Project Architecture
 
-The system is split into four main pieces:
+The system is split into three header-defined domains:
 
-1. **Host Tools (`tools/`)**: built binaries for `midi2afx` and `afx_info`, plus the helper script `generate_wavetable_map.py`.
-2. **Host Tool Sources (`src/tools/`)**: C23 utilities that pack samples, convert MIDI to `.afx`, and inspect `.afx` output.
-3. **ARM7 Driver (`src/driver/aica_driver.c`)**: a freestanding C99 driver that runs on the AICA ARM7DI and streams timestamped register writes.
-4. **SH4 Host API (`src/driver/aica_host_api.c`)**: a small control layer for play, stop, pause, volume, and seek IPC.
+1. **Common (`include/afx/common.h`)**: Shared file format, IPC types, and memory layout constants.
+2. **Driver (`include/afx/driver.h`)**: ARM7-specific internal state, AICA register offsets, and performance utilities.
+3. **Host (`include/afx/host.h`)**: SH-4 and host tool-side command IDs and section-parsing logic.
 
 Detailed architecture diagrams and runtime memory-flow notes are maintained in `docs/afx_design.md`.
 
@@ -29,8 +28,8 @@ Detailed architecture diagrams and runtime memory-flow notes are maintained in `
 
 | Section | Description |
 | :--- | :--- |
-| **Header (`afx_header_t`)** | Compact file header containing section-table location and total duration. |
-| **Section Table (`afx_section_entry_t[]`)** | Directory of typed chunks (`FLOW`, `SDES`, `SDAT`, optional `DSPM`, `DSPC`, `META`). |
+| **Header (`afx_header_t`)** | 20-byte lean header containing magic, version, section count, and duration. |
+| **Section Table (`afx_section_entry_t[]`)** | Directory of typed chunks immediately following the header. |
 | **FLOW** | Array of `afx_cmd_t` entries: timestamp, slot, register, value. |
 | **SDES** | Array of `afx_sample_desc_t` entries with source ID, GM program, format, loop info, root note, sample rate, and offsets. |
 | **SDAT** | Raw ADPCM or PCM sample bytes packed back-to-back. |
@@ -40,9 +39,9 @@ Relevant format properties:
 
 - `AICAF_MAGIC = 0xA1CAF200`
 - `AICAF_VERSION = 1`
-- Section order defaults to hot-first: `FLOW`, `SDES`, then `SDAT`
-- FLOW and SDES sections provide explicit `count` metadata in the section table
-- Sample addresses in flow commands are file-relative offsets; the ARM7 driver resolves them as `afx_base + relative_offset` at execution time
+- The section table is accessed via implicit offset (`sizeof(afx_header_t)`).
+- `AFX_ALIGN32` is supported for DMA-safe section alignment.
+- Sample addresses in flow commands are file-relative offsets; the ARM7 driver resolves them as `afx_base + relative_offset`.
 
 ## Build Instructions
 
