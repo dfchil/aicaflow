@@ -27,14 +27,27 @@
 #pragma pack(push, 1)
 
 typedef struct {
-    uint32_t song_base;        /* absolute SPU address of uploaded .afx */
-    uint32_t sample_base;      /* song_base + SDAT section offset */
-    uint32_t flow_ptr;         /* song_base + FLOW section offset */
+    uint32_t afx_base;         /* absolute SPU address of uploaded .afx */
+    uint32_t flow_ptr;         /* afx_base + FLOW section offset */
     uint32_t flow_count;       /* FLOW section entry count */
     uint32_t flow_idx;
     uint32_t next_event_tick;
     uint32_t is_playing;
     uint32_t loop_count;
+    /* Runtime scratch slots to avoid transient stack locals in ARM7 loops. */
+    uint32_t q_tail_latch;
+    uint32_t q_cmd;
+    uint32_t q_arg0;
+    uint32_t q_arg1;
+    uint32_t q_arg2;
+    uint32_t seek_target;
+    uint32_t flow_stream_ptr;
+    uint32_t current_hw;
+    uint32_t hw_delta;
+    uint32_t reg_ptr;
+    uint32_t reg_val;
+    uint32_t resolved_addr;
+    uint32_t next_cmd_ptr;
 } afx_player_state_t;
 
 typedef struct {
@@ -104,12 +117,10 @@ typedef struct {
 /*
  * Sample descriptor — 32 bytes (packed).
  *
- * SA_HI / SA_LO flow commands in the stream store the full blob-local byte offset
- * (equal to sample_off here).  The ARM7 driver adds
- * sample_base = (file_load_addr + SDAT section offset) once at PLAY time and
- * extracts the appropriate bits per register write.  The precompiler never
- * needs to know the runtime load address; the driver never performs
- * per-event address arithmetic.
+ * SA_HI / SA_LO flow commands in the stream store file-relative byte offsets.
+ * The ARM7 driver resolves absolute SPU addresses as:
+ *     absolute = afx_base + relative_offset
+ * at command execution time.
  */
 typedef struct {
     uint32_t source_id;     /* hash of originating WAV file (for info tools) */
@@ -159,11 +170,17 @@ static inline uint32_t afx_cmd_lower_bound_by_tick(const afx_cmd_t *stream,
     uint32_t lo = 0;
     uint32_t hi = count;
     while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
+        uint32_t mid = lo + ((hi - lo) >> 1);
         if (stream[mid].timestamp < target_tick) lo = mid + 1;
         else hi = mid;
     }
     return lo;
+}
+
+/* Resolve a file-relative offset to an absolute SPU address. */
+static inline uint32_t afx_resolve_file_offset(uint32_t afx_base,
+                                               uint32_t relative_offset) {
+    return afx_base + relative_offset;
 }
 
 #pragma pack(pop)

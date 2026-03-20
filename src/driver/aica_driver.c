@@ -22,6 +22,20 @@
 #define PLAYER_STATE ((volatile afx_player_state_t *)AFX_PLAYER_STATE_ADDR)
 #define IPC_QUEUE    ((volatile afx_ipc_cmd_t *)AFX_IPC_CMD_QUEUE_ADDR)
 
+/* Per-volume TL scaling table to keep the execute path multiply-free. */
+static uint8_t g_tl_scale_lut[256];
+static uint32_t g_tl_lut_volume = 0xFFFFFFFFu;
+
+static inline void rebuild_tl_scale_lut(uint32_t volume) {
+    uint32_t vol = volume & 0xFFu;
+    for (uint32_t tl = 0; tl < 256u; tl++) {
+        uint32_t x = (255u - tl) * vol;
+        uint32_t scaled = (x + 1u + (x >> 8)) >> 8; /* floor(x/255) for x<=65025 */
+        g_tl_scale_lut[tl] = (uint8_t)(255u - scaled);
+    }
+    g_tl_lut_volume = vol;
+}
+
 /**
  * Initialize Driver State at absolute addresses
  */
@@ -34,14 +48,28 @@ void driver_init(void) {
     IPC_STATUS->q_head = 0;
     IPC_STATUS->q_tail = 0;
     
-    PLAYER_STATE->song_base = 0;
-    PLAYER_STATE->sample_base = 0;
+    PLAYER_STATE->afx_base = 0;
     PLAYER_STATE->flow_ptr = 0;
     PLAYER_STATE->flow_count = 0;
     PLAYER_STATE->flow_idx = 0;
     PLAYER_STATE->next_event_tick = 0;
     PLAYER_STATE->is_playing = 0;
     PLAYER_STATE->loop_count = 0;
+    PLAYER_STATE->q_tail_latch = 0;
+    PLAYER_STATE->q_cmd = 0;
+    PLAYER_STATE->q_arg0 = 0;
+    PLAYER_STATE->q_arg1 = 0;
+    PLAYER_STATE->q_arg2 = 0;
+    PLAYER_STATE->seek_target = 0;
+    PLAYER_STATE->flow_stream_ptr = 0;
+    PLAYER_STATE->current_hw = 0;
+    PLAYER_STATE->hw_delta = 0;
+    PLAYER_STATE->reg_ptr = 0;
+    PLAYER_STATE->reg_val = 0;
+    PLAYER_STATE->resolved_addr = 0;
+    PLAYER_STATE->next_cmd_ptr = 0;
+
+    rebuild_tl_scale_lut(IPC_STATUS->volume);
 
     *AICA_LAST_HW_CLOCK = *AICA_HW_CLOCK;
     *AICA_VIRTUAL_CLOCK = 0;
@@ -66,18 +94,17 @@ static inline void process_command(uint32_t cmd, uint32_t arg0) {
                 break;
             }
 
-            PLAYER_STATE->song_base    = arg0;
-            PLAYER_STATE->sample_base  = arg0 + sdat_sect->offset;
-            PLAYER_STATE->flow_ptr     = arg0 + flow_sect->offset;
+            PLAYER_STATE->afx_base     = arg0;
+            PLAYER_STATE->flow_ptr     = afx_resolve_file_offset(PLAYER_STATE->afx_base, flow_sect->offset);
             PLAYER_STATE->flow_count   = flow_sect->count;
 
             if (dspc_sect && dspc_sect->size > 0) {
-                const uint32_t *src = (const uint32_t *)(uintptr_t)(arg0 + dspc_sect->offset);
+                const uint32_t *src = (const uint32_t *)(uintptr_t)afx_resolve_file_offset(PLAYER_STATE->afx_base, dspc_sect->offset);
                 uint32_t words = dspc_sect->size >> 2;
                 for (uint32_t w = 0; w < words; w++) AICA_DSP_COEF[w] = src[w];
             }
             if (dspm_sect && dspm_sect->size > 0) {
-                const uint32_t *src = (const uint32_t *)(uintptr_t)(arg0 + dspm_sect->offset);
+                const uint32_t *src = (const uint32_t *)(uintptr_t)afx_resolve_file_offset(PLAYER_STATE->afx_base, dspm_sect->offset);
                 uint32_t words = dspm_sect->size >> 2;
                 for (uint32_t w = 0; w < words; w++) AICA_DSP_MPRO[w] = src[w];
             }
@@ -102,18 +129,21 @@ static inline void process_command(uint32_t cmd, uint32_t arg0) {
             break;
         case AICAF_CMD_VOLUME:
             IPC_STATUS->volume = arg0 & 0xFF;
+            if (g_tl_lut_volume != IPC_STATUS->volume) {
+                rebuild_tl_scale_lut(IPC_STATUS->volume);
+            }
             break;
         case AICAF_CMD_SEEK:
         {
-            uint32_t target = arg0;
-            const afx_cmd_t *flow = (const afx_cmd_t *)(uintptr_t)PLAYER_STATE->flow_ptr;
+            PLAYER_STATE->seek_target = arg0;
+            PLAYER_STATE->flow_stream_ptr = PLAYER_STATE->flow_ptr;
             PLAYER_STATE->flow_idx = afx_cmd_lower_bound_by_tick(
-                flow,
+                (const afx_cmd_t *)(uintptr_t)PLAYER_STATE->flow_stream_ptr,
                 PLAYER_STATE->flow_count,
-                target
+                PLAYER_STATE->seek_target
             );
-            *AICA_VIRTUAL_CLOCK = target;
-            IPC_STATUS->current_tick = target;
+            *AICA_VIRTUAL_CLOCK = PLAYER_STATE->seek_target;
+            IPC_STATUS->current_tick = PLAYER_STATE->seek_target;
             break;
         }
         default:
@@ -124,22 +154,24 @@ static inline void process_command(uint32_t cmd, uint32_t arg0) {
 /**
  * Execute Flow Command
  * Writing directly to G2 bus registers for specific slot/reg.
+ * SA address fields are file-relative offsets resolved from afx_base.
  */
 static inline void execute_cmd(const afx_cmd_t *cmd) {
-    volatile uint32_t *reg_ptr = (volatile uint32_t *)(0x00800000 + (cmd->slot * 0x80) + (cmd->reg * 4));
-    uint32_t val = cmd->value;
+    PLAYER_STATE->reg_ptr = (uint32_t)(0x00800000 + (cmd->slot * 0x80) + (cmd->reg * 4));
+    PLAYER_STATE->reg_val = cmd->value;
 
-    /* SA flow commands store a blob-local byte offset; add the cached absolute
-     * sample base (set at PLAY time) and extract the correct bits. */
+    /* SA_LO and SA_HI contain file-relative offsets from .afx start. */
     if (cmd->reg == AICA_REG_SA_LO) {
-        val = (cmd->value + PLAYER_STATE->sample_base) & 0xFFFF;
+        PLAYER_STATE->resolved_addr = afx_resolve_file_offset(PLAYER_STATE->afx_base, cmd->value);
+        PLAYER_STATE->reg_val = PLAYER_STATE->resolved_addr & 0xFFFF;
     } else if (cmd->reg == AICA_REG_SA_HI) {
-        val = ((cmd->value + PLAYER_STATE->sample_base) >> 16) & 0xFF;
+        PLAYER_STATE->resolved_addr = afx_resolve_file_offset(PLAYER_STATE->afx_base, cmd->value);
+        PLAYER_STATE->reg_val = (PLAYER_STATE->resolved_addr >> 16) & 0xFF;
     } else if (cmd->reg == AICA_REG_TOT_LVL) {
-        val = afx_scale_total_level(val, IPC_STATUS->volume);
+        PLAYER_STATE->reg_val = g_tl_scale_lut[PLAYER_STATE->reg_val & 0xFFu];
     }
 
-    *reg_ptr = val;
+    *((volatile uint32_t *)(uintptr_t)PLAYER_STATE->reg_ptr) = PLAYER_STATE->reg_val;
 }
 
 /**
@@ -152,19 +184,22 @@ void arm_main(void) {
     while (1) {
         // Process incoming queued commands (SH4 producer -> ARM7 consumer)
         while (IPC_STATUS->q_tail != IPC_STATUS->q_head) {
-            uint32_t tail = IPC_STATUS->q_tail;
-            afx_ipc_cmd_t c = IPC_QUEUE[tail];
-            IPC_STATUS->q_tail = (tail + 1u) % AFX_IPC_QUEUE_CAPACITY;
-            process_command(c.cmd, c.arg0);
+            PLAYER_STATE->q_tail_latch = IPC_STATUS->q_tail;
+            PLAYER_STATE->q_cmd = IPC_QUEUE[PLAYER_STATE->q_tail_latch].cmd;
+            PLAYER_STATE->q_arg0 = IPC_QUEUE[PLAYER_STATE->q_tail_latch].arg0;
+            PLAYER_STATE->q_arg1 = IPC_QUEUE[PLAYER_STATE->q_tail_latch].arg1;
+            PLAYER_STATE->q_arg2 = IPC_QUEUE[PLAYER_STATE->q_tail_latch].arg2;
+            IPC_STATUS->q_tail = (PLAYER_STATE->q_tail_latch + 1u) & (AFX_IPC_QUEUE_CAPACITY - 1);
+            process_command(PLAYER_STATE->q_cmd, PLAYER_STATE->q_arg0);
         }
         
         // Update virtual clock based on true hardware ticks
-        uint32_t current_hw = *AICA_HW_CLOCK;
-        uint32_t delta = current_hw - *AICA_LAST_HW_CLOCK;
-        if (delta > 0) {
-            *AICA_LAST_HW_CLOCK = current_hw;
+        PLAYER_STATE->current_hw = *AICA_HW_CLOCK;
+        PLAYER_STATE->hw_delta = PLAYER_STATE->current_hw - *AICA_LAST_HW_CLOCK;
+        if (PLAYER_STATE->hw_delta > 0) {
+            *AICA_LAST_HW_CLOCK = PLAYER_STATE->current_hw;
             if (PLAYER_STATE->is_playing) {
-                *AICA_VIRTUAL_CLOCK += delta;
+                *AICA_VIRTUAL_CLOCK += PLAYER_STATE->hw_delta;
             }
         }
 
@@ -179,14 +214,14 @@ void arm_main(void) {
 
             // Simple Streaming Interpreter (While loop allows fast catching up if seeked forward)
             while (PLAYER_STATE->is_playing && PLAYER_STATE->flow_idx < PLAYER_STATE->flow_count) {
-                const afx_cmd_t *next_cmd = &((const afx_cmd_t *)(uintptr_t)(PLAYER_STATE->flow_ptr))[PLAYER_STATE->flow_idx];
+                PLAYER_STATE->next_cmd_ptr = (uint32_t)(uintptr_t)&((const afx_cmd_t *)(uintptr_t)(PLAYER_STATE->flow_ptr))[PLAYER_STATE->flow_idx];
 
-                if (*AICA_VIRTUAL_CLOCK >= next_cmd->timestamp) {
-                    execute_cmd(next_cmd);
+                if (*AICA_VIRTUAL_CLOCK >= ((const afx_cmd_t *)(uintptr_t)PLAYER_STATE->next_cmd_ptr)->timestamp) {
+                    execute_cmd((const afx_cmd_t *)(uintptr_t)PLAYER_STATE->next_cmd_ptr);
                     PLAYER_STATE->flow_idx++;
                     IPC_STATUS->flow_pos = PLAYER_STATE->flow_idx;
                 } else {
-                    PLAYER_STATE->next_event_tick = next_cmd->timestamp;
+                    PLAYER_STATE->next_event_tick = ((const afx_cmd_t *)(uintptr_t)PLAYER_STATE->next_cmd_ptr)->timestamp;
                     break;
                 }
             }

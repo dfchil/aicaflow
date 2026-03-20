@@ -13,6 +13,8 @@ The system is split into four main pieces:
 3. **ARM7 Driver (`src/driver/aica_driver.c`)**: a freestanding C99 driver that runs on the AICA ARM7DI and streams timestamped register writes.
 4. **SH4 Host API (`src/driver/aica_host_api.c`)**: a small control layer for play, stop, pause, volume, and seek IPC.
 
+Detailed architecture diagrams and runtime memory-flow notes are maintained in `docs/afx_design.md`.
+
 ## Key Features
 
 - **Integrated Wavetable Synthesis**: Automatically scans a user-defined directory (e.g., "Echo Sound Works Core Tables") to map MIDI Program Change messages to high-quality PCM samples.
@@ -40,7 +42,7 @@ Relevant format properties:
 - `AICAF_VERSION = 1`
 - Section order defaults to hot-first: `FLOW`, `SDES`, then `SDAT`
 - FLOW and SDES sections provide explicit `count` metadata in the section table
-- Sample addresses in flow commands are SDAT-local offsets; the ARM7 driver adds the SDAT base once at playback time
+- Sample addresses in flow commands are file-relative offsets; the ARM7 driver resolves them as `afx_base + relative_offset` at execution time
 
 ## Build Instructions
 
@@ -136,39 +138,5 @@ Control commands are transported over a ring queue in AICA RAM (`AFX_IPC_CMD_QUE
 
 For bring-up, SH4 can upload and initialize firmware with `afx_upload_and_init_firmware()`. This helper uses the default firmware load address, writes a 32-byte aligned dynamic-upload base marker immediately after the firmware image, and resets allocator state tracked in SH4-side `aica_state_t`.
 
-The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the flow-command stream: global total-level scaling for music volume.
+The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the flow-command stream: global total-level scaling for music volume (via a cached 256-entry TL lookup table rebuilt only on volume changes).
 
-## Memory Map (SPU RAM)
-
-Current layout constants (from `include/afx/afx.h`):
-
-- `AFX_MEM_CLOCKS = 0x001FFFE0`
-- `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (32-byte status block)
-- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (0x0400 queue block)
-- `AFX_PLAYER_STATE_ADDR = 0x001FFBA0` (32-byte player state)
-
-The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place from the queued `PLAY` command argument and caches only absolute base pointers in `afx_player_state_t`.
-
-```mermaid
-graph TD
-    subgraph AICA_RAM ["AICA 2-Megabyte RAM Stack"]
-        direction TB
-
-        CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
-
-        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFBA0 - 0x001FFFE0"]
-            direction TB
-            QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
-            PLAYER["<b>Player State</b><br/>0x001FFBA0 - 0x001FFBBF<br/>(afx_player_state_t)"]
-            STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t)"]
-            QUEUE --- PLAYER
-            PLAYER --- STATUS
-        end
-
-        CLOCKS --- IPC_BLOCK
-        IPC_BLOCK --- DYNAMIC
-        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FFBA0"]
-        DYNAMIC --- DRIVER
-        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 ~2KB"]
-    end
-```

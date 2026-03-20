@@ -20,6 +20,43 @@ The result is a flow-command architecture where the runtime is deterministic and
 
 ---
 
+
+## Driver Memory Map (SPU RAM)
+
+Current layout constants (from `include/afx/afx.h`):
+
+- `AFX_MEM_CLOCKS = 0x001FFFE0`
+- `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (32-byte status block)
+- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (0x0400 queue block)
+- `AFX_PLAYER_STATE_ADDR = 0x001FFB60` (size/alignment-derived from `afx_player_state_t`, currently 80 bytes)
+
+The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place from the queued `PLAY` command argument and keeps runtime state in `afx_player_state_t`.
+
+```mermaid
+graph TD
+    subgraph AICA_RAM ["AICA 2-Megabyte RAM Stack"]
+        direction TB
+
+        CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
+
+        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFB60 - 0x001FFFE0"]
+            direction TB
+            QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
+            PLAYER["<b>Player State</b><br/>0x001FFB60 - 0x001FFBAF<br/>(afx_player_state_t, 80 bytes)"]
+            STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t)"]
+            QUEUE --- PLAYER
+            PLAYER --- STATUS
+        end
+
+        CLOCKS --- IPC_BLOCK
+        IPC_BLOCK --- DYNAMIC
+        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FFB60"]
+        DYNAMIC --- DRIVER
+        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 ~2KB"]
+    end
+```
+
+
 ## Binary Layout
 
 ```
@@ -109,8 +146,6 @@ typedef struct {
 
 ## AICA Register Command Targets
 
-(Previously titled "Opcode Register Reference")
-
 | Constant        | Value | AICA Register                         |
 |----------------|-------|---------------------------------------|
 | AICA_REG_CTL    | 0x00  | Control / KeyOn / KeyOff / format     |
@@ -130,20 +165,47 @@ typedef struct {
 
 ---
 
-## Runtime Address Model (Current)
+## Runtime Offset Model
 
-The command stream stores blob-local sample offsets in SA command values.
-At runtime, ARM7 adds `sample_base` and writes split SA_HI/SA_LO register data.
+The driver keeps a single base pointer to the uploaded `.afx` file in AICA RAM (`afx_base`).
+All offsets emitted by the preprocessor are file-relative and ARM7 resolves them at use time.
 
-So current behavior is:
-- host emits blob-local offsets
-- driver applies one address fixup for SA writes
+### Address Resolution Rule
 
-This is intentional in the current implementation.
+For any file-relative value:
+
+```c
+absolute_spu_addr = afx_base + relative_offset;
+```
+
+### Runtime Behavior
+
+**Initialization (PLAY time)**:
+1. ARM7 stores the file base pointer in player state (`afx_base`)
+2. ARM7 resolves known section pointers (for example, `FLOW`) using `afx_base + section.offset`
+
+**Command Execution**:
+- `SA_HI`/`SA_LO` command values are file-relative sample addresses
+- ARM7 resolves the absolute sample address using `afx_base + cmd.value`
+- High/low register fields are extracted from that resolved absolute address
+
+### Runtime Fast Path Notes
+
+- `afx_player_state_t` includes runtime scratch fields used by the ARM7 loop to minimize transient locals in hot paths.
+- Queue tail wrap is fixed-size (`AFX_IPC_QUEUE_CAPACITY`), enabling constant-time ring behavior.
+- `TOT_LVL` volume scaling is lookup-table based at runtime:
+    - a 256-entry TL scale table is rebuilt only when volume changes
+    - per-command `TOT_LVL` writes use direct table lookup (no multiply/divide in the hot write path)
+
+### Why This Model
+
+- No per-resource cache structure in runtime state
+- No dependency on section-specific cached bases
+- Uniform rule for all present and future file-relative resources
 
 ---
 
-## SH4/ARM7 IPC Model (Current)
+## SH4/ARM7 IPC Model
 
 IPC transport is now a ring queue in AICA RAM.
 
@@ -203,7 +265,7 @@ This affects flow-command generation, not driver complexity.
 
 1. Stable header/descriptor/stream schema implemented in code
 2. DSP payload embedding and driver upload path implemented
-3. Global runtime music volume scaling on TOT_LVL implemented
+3. Global runtime music volume scaling on TOT_LVL implemented (LUT fast path)
 4. SH4-managed dynamic AICA upload helpers implemented
 5. Firmware upload/init helper with dynamic-base marker implemented
 6. IPC ring queue mechanism implemented (replacing single mailbox fields)

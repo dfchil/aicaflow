@@ -2,3 +2,6 @@ tools/midi2afx
 tools/afx_info
 input/
 tests/artifacts/
+src/driver/*.elf
+src/driver/*.o
+src/driver/*.bin

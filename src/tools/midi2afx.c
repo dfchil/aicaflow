@@ -405,9 +405,8 @@ static void pack_file(const char *path, uint8_t program, uint32_t source_id, FIL
 /*
  * write_patch_flow_cmds — emit all per-voice register writes for a note-on.
  *
- * SA encoding: both SA_HI and SA_LO carry the full blob-local byte offset
- * (p.addr).  The ARM7 driver adds sample_base once at PLAY time and then
- * extracts the correct bits per register type — no carry issues.
+ * SA encoding: both SA_HI and SA_LO initially carry SDAT-local byte offsets.
+ * They are converted to file-relative offsets once section layout is finalized.
  */
 static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t program,
                                   uint8_t ar, uint8_t rr,
@@ -416,7 +415,7 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
     patch_info_t p = instrument_bank[program];
     if (p.size == 0) return;
 
-    /* Sample address: full blob-local offset in both HI and LO flow commands */
+    /* Sample address: SDAT-local offset in both HI and LO flow commands */
     cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, p.addr };
     cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr };
 
@@ -817,6 +816,20 @@ int main(int argc, char **argv) {
     header.section_table_off = sizeof(afx_header_t);
     header.section_table_size = section_count * (uint32_t)sizeof(afx_section_entry_t);
     header.total_ticks = max_timestamp;
+
+    /* Convert SDAT-local addresses to file-relative offsets for ARM7 runtime. */
+    uint32_t sdat_file_off = sections[2].offset;
+    for (uint32_t i = 0; i < flow_cmd_count; i++) {
+        uint8_t reg = flow_cmd_buffer[i].reg;
+        if (reg == AICA_REG_SA_HI || reg == AICA_REG_SA_LO ||
+            reg == AICA_REG_LSA_HI || reg == AICA_REG_LSA_LO ||
+            reg == AICA_REG_LEA_HI || reg == AICA_REG_LEA_LO) {
+            flow_cmd_buffer[i].value += sdat_file_off;
+        }
+    }
+    for (uint32_t i = 0; i < source_count; i++) {
+        s_entries[i].sample_off += sdat_file_off;
+    }
 
     fseek(f_out, 0, SEEK_SET);
     fwrite(&header, sizeof(header), 1, f_out);

@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
     printf("Flow Cmds:  %u entries, %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_bytes, flow_cmd_pct, flow_data_off);
     printf("--------------------------------------\n");
 
-    // Scan Opcodes
+    // Scan flow commands to gather register usage stats and correlate sample address usage with sample descriptors
     uint32_t slot_addr[64] = {0};
     bool slot_has_addr[64] = {0};
     uint32_t *addr_counts = NULL;
@@ -164,7 +164,7 @@ int main(int argc, char **argv) {
                 afx_cmd_t cmd;
                 if (fread(&cmd, 1, sizeof(cmd), f) != sizeof(cmd)) break;
 
-                /* SA_HI and SA_LO both store the full blob-local address */
+                /* SA_HI and SA_LO both store the full file-relative address */
                 if (cmd.reg == AICA_REG_SA_LO) {
                     slot_addr[cmd.slot] = cmd.value;
                     slot_has_addr[cmd.slot] = true;
@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        printf("Opcode Register Distribution:\n");
+        printf("Flow Command Register Distribution:\n");
         for (int i = 0; i < 16; i++) {
             if (stats[i].count > 0) {
                 if (stats[i].reg != 0xFF && stats[i].reg != 0xFE && stats[i].reg != 0xFD)
@@ -230,9 +230,11 @@ int main(int argc, char **argv) {
                         } else if (cur_id == descs[i].source_id && strchr(line, '}')) break;
                     }
                 }
-                printf("  [%u] Prog %3u  src 0x%08X  off 0x%06X  %u bytes  %u Hz  root %d  %s  %s  [%s]  [Used %u times]\n",
+                uint32_t off_file = descs[i].sample_off;
+                uint32_t off_sdat = (off_file >= sample_data_off) ? (off_file - sample_data_off) : 0;
+                printf("  [%u] Prog %3u  src 0x%08X  off(file) 0x%06X  off(sdat) 0x%06X  %u bytes  %u Hz  root %d  %s  %s  [%s]  [Used %u times]\n",
                     i, descs[i].gm_program, descs[i].source_id,
-                    descs[i].sample_off, descs[i].sample_size, descs[i].sample_rate,
+                    off_file, off_sdat, descs[i].sample_size, descs[i].sample_rate,
                     descs[i].root_note, fmt_name, loop_name, filename,
                     addr_counts ? addr_counts[i] : 0);
             }
