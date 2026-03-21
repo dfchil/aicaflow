@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
-#include <afx/afx.h>
+#include <afx/host.h>
+#include <afx/afx_driver.h>
+
 
 /* KOS specific headers (simulated/assumed available in user's KOS setup) */
 #ifdef KOS_HEADERS
@@ -18,10 +20,14 @@
  */
 
 #define SPU_RAM_BASE 0xA0800000 /* SH4 cached view of SPU RAM (mirrored) */
-#define SPU_RAM_UNCACHED 0xA0000000 /* Adjust if needed for specific KOS setup */
 
 #define AFX_DYNAMIC_DEFAULT_BASE 0x00002000u
 #define AFX_FIRMWARE_DEFAULT_ADDR 0x00000000u
+
+
+// Bare-Metal hardware registers
+#define G2_WAIT_REG (*(volatile uint32_t*)0xa05f68a0)
+#define AICA_ARM_EN_REG (*(volatile uint32_t*)0xa0702c00)
 
 static aica_state_t g_aica_state = {
     .dynamic_base = AFX_DYNAMIC_DEFAULT_BASE,
@@ -41,7 +47,7 @@ static bool afx_queue_push(uint32_t cmd, uint32_t arg0, uint32_t arg1, uint32_t 
         volatile afx_ipc_status_t *status = get_ipc_status();
         uint32_t head = status->q_head;
         uint32_t tail = status->q_tail;
-        uint32_t next = (head + 1u) % AFX_IPC_QUEUE_CAPACITY;
+        uint32_t next = (head + 1u) & (AFX_IPC_QUEUE_CAPACITY - 1u);
         if (next == tail) continue; // queue full; wait for ARM7 to consume
 
         queue[head].cmd = cmd;
@@ -94,14 +100,36 @@ bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size) {
 }
 
 uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size) {
+    if (!afx_data || afx_size == 0) return 0;
     uint32_t spu_addr = afx_mem_alloc(afx_size, 32);
     if (spu_addr == 0) return 0;
     if (!afx_mem_write(spu_addr, afx_data, afx_size)) return 0;
     return spu_addr;
 }
 
+
+void aicaplayer_shutdown(void) {
+    // 1. Halt AICA ARM7 CPU
+    AICA_ARM_EN_REG = AICA_ARM_EN_REG | 1;
+
+    // 2. Reset the AICA Hardware state from the SH-4 side
+    // We clear the channel registers to stop all sound immediately
+    volatile uint32_t* aica_reg = (volatile uint32_t*)SPU_RAM_BASE;
+    for(int i = 0; i < 64; i++) {
+        // Offset to channel i's registers (128 bytes per slot)
+        volatile uint32_t* slot = (volatile uint32_t*)((uint8_t*)aica_reg + (i * 128));
+        slot[0] = 0x8000; // Key OFF, 16-bit
+        for(int j = 1; j < 32; j++) slot[j] = 0;
+    }
+}
+
+
 bool afx_upload_and_init_firmware(const void *fw_data,
                                   uint32_t fw_size) {
+
+    // 1. Initialize G2 Wait States for safe AICA memory writing
+    G2_WAIT_REG = 0x1f;
+
     if (!fw_data || fw_size == 0) return false;
 
     uint32_t fw_spu_addr = AFX_FIRMWARE_DEFAULT_ADDR;

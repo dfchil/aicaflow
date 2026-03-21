@@ -26,9 +26,14 @@ The result is a flow-command architecture where the runtime is deterministic and
 Current layout constants (from `include/afx/common.h` and `driver.h`):
 
 - `AFX_MEM_CLOCKS = 0x001FFFE0`
-- `AFX_IPC_STATUS_ADDR = 0x001FFFE0` (Status block calculation base)
-- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBE0` (32-byte aligned base)
-- `AFX_PLAYER_STATE_ADDR = 0x001FFB60` (80-byte state block)
+- `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (`sizeof(afx_ipc_status_t)=32`, aligned)
+- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (`AFX_IPC_QUEUE_SZ=0x0400`)
+- `AFX_PLAYER_STATE_ADDR = 0x001FFA60` (`sizeof(afx_player_state_t)=340`, aligned down to 32-byte boundary)
+
+Addresses are derived by macros, not hardcoded constants:
+- `AFX_IPC_STATUS_ADDR = ((AFX_MEM_CLOCKS - sizeof(afx_ipc_status_t)) & ~31)`
+- `AFX_IPC_CMD_QUEUE_ADDR = (AFX_IPC_STATUS_ADDR - AFX_IPC_QUEUE_SZ)`
+- `AFX_PLAYER_STATE_ADDR = ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_player_state_t)) & ~31)`
 
 The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_player_state_t` at a fixed high-memory address to avoid stack usage.
 
@@ -39,18 +44,18 @@ graph TD
 
         CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
 
-        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFB60 - 0x001FFFE0"]
+        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFA60 - 0x001FFFE0"]
             direction TB
-            STATUS["<b>IPC Status Struct</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(afx_ipc_status_t)"]
-            QUEUE["<b>Command Queue</b><br/>0x001FFBE0 - 0x001FFFDF<br/>(0x0400 bytes)"]
-            PLAYER["<b>Player State</b><br/>0x001FFB60 - 0x001FFBAF<br/>(afx_player_state_t, 80 bytes)"]
+            STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t, 32 bytes)"]
+            QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
+            PLAYER["<b>Player State</b><br/>0x001FFA60 - 0x001FFBB3<br/>(afx_player_state_t, 340 bytes)"]
             STATUS --- QUEUE
             QUEUE --- PLAYER
         end
 
         CLOCKS --- IPC_BLOCK
         IPC_BLOCK --- DYNAMIC
-        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FFB60"]
+        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FFA5F"]
         DYNAMIC --- DRIVER
         DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 ~2KB"]
     end

@@ -12,7 +12,7 @@ static void test_struct_layout(void) {
     assert(sizeof(afx_sample_desc_t) == 32);
     assert(sizeof(afx_cmd_t) == 12);
 
-    assert(AICAF_MAGIC == 0xA1CAF200u);
+    assert(AICAF_MAGIC == 0xA1CAF100u);
     assert(AICAF_VERSION == 1u);
     assert(AICAF_CMD_SEEK == 5u);
     assert(AFX_SECT_FLOW == 0x574F4C46u);

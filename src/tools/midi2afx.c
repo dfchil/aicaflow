@@ -3,8 +3,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
-#include <dirent.h>
-#include <ctype.h>
 #include <afx/driver.h>
 #include <afx/host.h>
 #include <math.h>
@@ -317,18 +315,16 @@ static void pack_file(const char *path, uint8_t program, uint32_t source_id, FIL
     char chunk_id[4];
     uint32_t data_size = 0;
     uint32_t sample_rate = 44100;
-    uint16_t bits_per_sample = 16;
     fseek(f_wav, 12, SEEK_SET);
     while (fread(chunk_id, 1, 4, f_wav) == 4) {
         uint32_t chunk_sz;
-        fread(&chunk_sz, 4, 1, f_wav);
+        if (fread(&chunk_sz, 4, 1, f_wav) != 1) break;
         if (memcmp(chunk_id, "fmt ", 4) == 0) {
-            uint16_t audio_fmt; fread(&audio_fmt, 2, 1, f_wav);
-            uint16_t channels;  fread(&channels,  2, 1, f_wav);
-            uint32_t sr;        fread(&sr, 4, 1, f_wav);
+            if (fseek(f_wav, 4, SEEK_CUR) != 0) break; /* skip audio_fmt + channels */
+            uint32_t sr;
+            if (fread(&sr, 4, 1, f_wav) != 1) break;
             sample_rate = sr;
-            fseek(f_wav, 6, SEEK_CUR); /* skip byte_rate (4) + block_align (2) */
-            fread(&bits_per_sample, 2, 1, f_wav);
+            if (fseek(f_wav, 8, SEEK_CUR) != 0) break; /* skip byte_rate + block_align + bits_per_sample */
             if (chunk_sz > 16) fseek(f_wav, chunk_sz - 16, SEEK_CUR);
         } else if (memcmp(chunk_id, "data", 4) == 0) {
             data_size = chunk_sz;
@@ -541,12 +537,13 @@ int main(int argc, char **argv) {
     char chunk[4];
     while(fread(chunk, 1, 4, f_mid) == 4) {
         uint32_t len;
-        fread(&len, 4, 1, f_mid);
+        if (fread(&len, 4, 1, f_mid) != 1) break;
         len = __builtin_bswap32(len);
         if(memcmp(chunk, "MTrk", 4) == 0) {
             long track_end = ftell(f_mid) + len;
             while(ftell(f_mid) < track_end) {
-                read_varlen(f_mid); 
+                uint32_t ignored_delta = read_varlen(f_mid);
+                (void)ignored_delta;
                 int status = fgetc(f_mid);
                 if (status == EOF) break;
                 if (status == 0xFF) { fgetc(f_mid); uint32_t mlen = read_varlen(f_mid); fseek(f_mid, mlen, SEEK_CUR); }
@@ -640,7 +637,9 @@ int main(int argc, char **argv) {
 
     fseek(f_mid, 14, SEEK_SET);
     while(fread(chunk, 1, 4, f_mid) == 4) {
-        uint32_t len; fread(&len, 4, 1, f_mid); len = __builtin_bswap32(len);
+        uint32_t len;
+        if (fread(&len, 4, 1, f_mid) != 1) break;
+        len = __builtin_bswap32(len);
         if(memcmp(chunk, "MTrk", 4) == 0) {
             long track_end = ftell(f_mid) + len;
             uint8_t running_status = 0;
@@ -707,16 +706,16 @@ int main(int argc, char **argv) {
     }
 
     while(fread(chunk, 1, 4, f_mid) == 4) {
-        uint32_t len; fread(&len, 4, 1, f_mid); len = __builtin_bswap32(len);
+        uint32_t len;
+        if (fread(&len, 4, 1, f_mid) != 1) break;
+        len = __builtin_bswap32(len);
         if(memcmp(chunk, "MTrk", 4) == 0) {
             long track_end = ftell(f_mid) + len;
-            uint32_t current_ticks = 0;
             uint32_t current_ms = 0;
             uint32_t tempo_us_pqn = 500000; // 120 BPM default
             uint8_t running_status = 0;
             while(ftell(f_mid) < track_end) {
                 uint32_t delta = read_varlen(f_mid);
-                current_ticks += delta;
                 
                 // Update timestamp based on current tempo
                 current_ms += (delta * tempo_us_pqn) / (ppqn * 1000);
@@ -743,7 +742,6 @@ int main(int argc, char **argv) {
                         uint8_t root = sample_descs[prog].root_note ? sample_descs[prog].root_note : 60;
                         float ratio = midi_note_to_freq(note) / midi_note_to_freq(root);
                         int rel = clamp_int((int)channel_release[chan] + (int)policy.release_bias, 0, 31);
-                        afx_sample_desc_t *desc = &sample_descs[prog];
                         write_patch_flow_cmds(current_ms, slot, prog,
                                               channel_attack[chan], (uint8_t)15, (uint8_t)15, (uint8_t)rel, (uint8_t)0,
                                               vel_shaped, channel_pan[chan],

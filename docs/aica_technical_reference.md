@@ -57,9 +57,11 @@ Project suggestion (AICAFlow layout):
 - `0x001FFFE0 - 0x001FFFFF`: clock/timer mirror block (`AFX_MEM_CLOCKS`).
 - `0x001FFFC0 - 0x001FFFDF`: IPC status (`AFX_IPC_STATUS_ADDR`).
 - `0x001FFBC0 - 0x001FFFBF`: SH4->ARM7 ring queue (`AFX_IPC_CMD_QUEUE_ADDR`, `0x0400` bytes).
-- `0x001FFBA0 - 0x001FFBBF`: player state (`AFX_PLAYER_STATE_ADDR`).
-- `0x00002000 - 0x001FFBA0`: SH4-managed dynamic upload area (full `.afx` payloads uploaded in-place).
+- `0x001FFA60 - 0x001FFBB3`: player state (`AFX_PLAYER_STATE_ADDR`, `sizeof(afx_player_state_t)=340`).
+- `0x00002000 - 0x001FFA5F`: SH4-managed dynamic upload area (full `.afx` payloads uploaded in-place).
 - `0x00000000 - 0x00001FFF`: ARM7 firmware payload + startup data.
+
+Note: these addresses are macro-derived from structure sizes and 32-byte alignment in `include/afx/driver.h`.
 
 Samples should be aligned to at least 32-bit boundaries. ADPCM typically reduces sample footprint by about 50% compared to PCM16, with encode-side complexity and hardware decode at playback.
 

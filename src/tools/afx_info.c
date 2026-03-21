@@ -44,15 +44,6 @@ reg_stat_t stats[] = {
     { 0xFF,             "OTHER",    0 }
 };
 
-static const afx_section_entry_t *find_section(const afx_section_entry_t *tab,
-                                               uint32_t count,
-                                               uint32_t id) {
-    for (uint32_t i = 0; i < count; i++) {
-        if (tab[i].id == id) return &tab[i];
-    }
-    return NULL;
-}
-
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("Usage: %s <file.aicaflow> [wavetables.map]\n", argv[0]);
@@ -163,8 +154,13 @@ int main(int argc, char **argv) {
             descs          = malloc(source_map_count * sizeof(afx_sample_desc_t));
             if (sample_formats)
                 for (uint32_t i = 0; i < source_map_count; i++) sample_formats[i] = -1;
-            fseek(f, source_map_off, SEEK_SET);
-            fread(descs, sizeof(afx_sample_desc_t), source_map_count, f);
+            if (descs) {
+                fseek(f, source_map_off, SEEK_SET);
+                if (fread(descs, sizeof(afx_sample_desc_t), source_map_count, f) != source_map_count) {
+                    free(descs);
+                    descs = NULL;
+                }
+            }
         }
 
         if (flow_data_size > 0) {

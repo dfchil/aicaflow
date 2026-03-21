@@ -169,62 +169,43 @@ class AFXEmulator:
                 # 0x02: LSA
                 # 0x03: LEA
                 if reg == 0x00: # SA_HI & CTL
+                    # Track Sample Address (Bits 0-6 of SA_HI | Bits 0-15 of SA_LO)
+                    s['sa_base'] = (s['sa_base'] & 0x00FFFF) | ((val & 0x7F) << 16)
+
                     if val & (1 << 15): # KEY ON
+                        # Resolution of Sample based on combined SA address
+                        entry = offset_to_entry.get(s['sa_base'])
+                        if entry:
+                            path, d = entry
+                            s['program'] = d['gm_program']
+                            s['orig_rate'] = d['sample_rate']
+                            s['loop_mode'] = d['loop_mode']
+                            fmt = d['format']
+                            bps = 2.0 if fmt == 0 else (1.0 if fmt == 1 else 0.5)
+                            s['loop_start_samp'] = int(d['loop_start'] / bps)
+                            s['loop_end_samp']   = int(d['loop_end']   / bps) if d['loop_end'] > 0 else 0
+                            if path in loaded_waveforms:
+                                s['pcm'], _ = loaded_waveforms[path]
+                        
                         s['active'] = True
                         s['pos'] = 0.0
                     elif val & (1 << 14): # KEY OFF
                         s['active'] = False
-                    
-                    # Track Sample Address (Bits 0-6 of SA_HI | Bits 0-15 of SA_LO)
-                    s['sa_base'] = (s['sa_base'] & 0x00FFFF) | ((val & 0x7F) << 16)
                 elif reg == 0x01: # SA_LO
                     s['sa_base'] = (s['sa_base'] & 0x7F0000) | (val & 0xFFFF)
-                    
-                    # Logic to identify which sample we are playing based on the address
-                    # The ARM driver resolves file-relative, so we check our map
-                    entry = offset_to_entry.get(s['sa_base'])
-                    if entry:
-                        path, d = entry
-                        s['program'] = d['gm_program']
-                        s['orig_rate'] = d['sample_rate']
-                        s['loop_mode'] = d['loop_mode']
-                        # Loop points in desc are byte offsets relative to sample start.
-                        # Since LSA/LEA are now pre-calculated into the sequence, 
-                        # we prefer the descriptor as truth for the emulator logic.
-                        fmt = d['format']
-                        bps = 2.0 if fmt == 0 else (1.0 if fmt == 1 else 0.5)
-                        s['loop_start_samp'] = int(d['loop_start'] / bps)
-                        s['loop_end_samp']   = int(d['loop_end']   / bps) if d['loop_end'] > 0 else 0
-                        if path in loaded_waveforms:
-                            s['pcm'], _ = loaded_waveforms[path]
-                elif reg == 0x02: # LSA (Rel to SA)
-                    # We can use this to override descriptor if needed
-                    pass
-                elif reg == 0x03: # LEA (Rel to SA)
-                    pass
-                elif reg == 0x0C: # FNS_OCT
-                    entry = offset_to_entry.get(val)
-                    if entry:
-                        path, desc = entry
-                        s['program'] = desc['gm_program']
-                        s['orig_rate'] = desc['sample_rate']
-                        s['loop_mode'] = desc['loop_mode']
-                        # Convert loop byte offsets to sample indices based on format
-                        # AFX_FMT_PCM16=0 (2 bps), AFX_FMT_PCM8=1 (1 bps), AFX_FMT_ADPCM=3 (0.5 bps)
-                        fmt = desc['format']
-                        bps = 2.0 if fmt == 0 else (1.0 if fmt == 1 else 0.5)
-                        s['loop_start_samp'] = int(desc['loop_start'] / bps)
-                        s['loop_end_samp']   = int(desc['loop_end']   / bps) if desc['loop_end'] > 0 else 0
-                        if path in loaded_waveforms:
-                            s['pcm'], _ = loaded_waveforms[path]
                 elif reg == 0x0C: # FNS_OCT
                     s['freq_mult'] = self.aica_pitch_to_freq_mult(val)
+                elif reg == 0x0D: # TOT_LVL
+                    # AICA Total Level (0=loudest, 255=silent). Invert to 0.0..1.0
+                    s['vol'] = (255 - (val & 0xFF)) / 255.0
+                elif reg == 0x0E: # PAN_VOL
+                    # PAN_VOL top bits [15:13] might be volume? (AICA specific)
+                    # For now just use TOT_LVL for gain simulation
+                    pass
 
             # Perform synthesis for this sample
             for s in slots:
-                if not (s['active'] and s['pcm'] is not None):
-                    continue
-                else:
+                if s['active'] and s['pcm'] is not None:
                     # Calculate playback increment
                     # Hardware frequency = orig_rate * freq_mult
                     # Sample step = Hardware freq / Simulation Sample Rate
@@ -233,18 +214,21 @@ class AFXEmulator:
                     loop_end = s['loop_end_samp'] if s['loop_end_samp'] > 0 else pcm_len
                     loop_end = min(loop_end, pcm_len)
                     idx = int(s['pos'])
+                    
                     if idx >= loop_end:
-                        if s['loop_mode'] != 0:  # forward or bidir: wrap to loop_start
+                        if s['loop_mode'] != 0:  # AFX_LOOP_NONE=0
                             s['pos'] = float(s['loop_start_samp'])
-                            idx = s['loop_start_samp']
+                            idx = int(s['pos'])
                         else:
                             s['active'] = False
                             continue
-                    frac = s['pos'] - idx
-                    next_idx = min(idx + 1, loop_end - 1)
-                    sample = s['pcm'][idx] * (1.0 - frac) + s['pcm'][next_idx] * frac
-                    mix_buffer[i] += sample * 0.25
-                    s['pos'] += step
+                            
+                    if idx < pcm_len:
+                        frac = s['pos'] - idx
+                        next_idx = min(idx + 1, pcm_len - 1)
+                        sample = s['pcm'][idx] * (1.0 - frac) + s['pcm'][next_idx] * frac
+                        mix_buffer[i] += sample * s['vol'] * 0.25
+                        s['pos'] += step
 
         # Export result
         max_val = np.max(np.abs(mix_buffer))

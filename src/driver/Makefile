@@ -4,8 +4,6 @@
 include $(KOS_BASE)/Makefile.rules
 
 
-CC	  = $(DC_ARM_CC)
-OBJCOPY = $(DC_ARM_OBJCOPY)
 AS	  = $(DC_ARM_AS) # Using gcc as assembler wrapper for crt0
 
 # Driver configuration
@@ -20,32 +18,42 @@ CFLAGS  = -marm -mcpu=arm7di -O2 -std=c99 -Wall -ffreestanding -fno-stack-protec
 
 LDFLAGS = -nostdlib -Wl,-Ttext=0x00000000 -Wl,--build-id=none
 
-SRCS	= aica_driver.c
-OBJS	= aica_driver.o
+SRCS	= afx_driver.c
+OBJS	= afx_driver.o
 CRT0_S  = crt0.s
 CRT0_O  = crt0.o
 
-TARGET  = aica_driver.bin
-ELF	 = aica_driver.elf
+BINDIR= ../../bin
+ELF	 = afx_driver.elf
 
-all: $(TARGET)
+DRIVER=afx_driver.bin
+DRIVER_INCLUDE := ../../include/afx/afx_driver.h
+
+HOSTLIB=$(BINDIR)/afx_host.a
+
+all: $(HOSTLIB)
 
 $(CRT0_O): $(CRT0_S)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(DC_ARM_CC) $(CFLAGS) -c $< -o $@
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(DC_ARM_CC) $(CFLAGS) -c $< -o $@
 
 $(ELF): $(CRT0_O) $(OBJS)
-	$(CC) $(LDFLAGS) $(CRT0_O) $(OBJS) -o $@
+	$(DC_ARM_CC) $(LDFLAGS) $(CRT0_O) $(OBJS) -o $@
 
-$(TARGET): $(ELF)
-	$(OBJCOPY) -O binary $< $@
+$(DRIVER): $(ELF)
+	$(DC_ARM_OBJCOPY) -O binary $< $@
+
+
+$(DRIVER_INCLUDE): $(DRIVER)
+	$(KOS_BASE)/utils/bin2c/bin2c $< $@ afx_driver
+
+$(HOSTLIB): afx_host_lib.c $(DRIVER_INCLUDE)
+	@mkdir -p $(BINDIR)
+	$(KOS_CC) $(KOS_CFLAGS) -I../../include -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(CRT0_O) $(ELF) $(TARGET)
+	rm -f $(OBJS) $(CRT0_O) $(ELF) $(DRIVER) $(HOSTLIB) $(DRIVER_INCLUDE)
 
 .PHONY: all clean
