@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <afx/afx_driver.h>
 
 uint8_t wilhelm_adpcm_data[] = {
 #embed "../embeds/simple/sfx/ADPCM/Wilhelm_Scream.dca"

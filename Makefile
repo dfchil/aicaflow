@@ -1,8 +1,12 @@
 # AICA Flow Top-Level Makefile
 
-.PHONY: all clean tools driver test test-unit test-integration help submodules
+.PHONY: all clean tools driver test test-unit test-integration help submodules examples
 
-all: submodules tools driver
+all: submodules tools driver examples
+
+examples:
+	@echo "--- Building Examples ---"
+	$(MAKE) -C examples/simple
 
 submodules:
 	@echo "--- Initializing Git Submodules ---"
@@ -31,6 +35,7 @@ clean:
 	$(MAKE) -C src/tools clean
 	$(MAKE) -C src/driver clean
 	$(MAKE) -C tests clean
+	$(MAKE) -C examples/simple clean
 
 help:
 	@echo "AICA Flow Build System"
