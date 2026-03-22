@@ -418,8 +418,8 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
     uint32_t ctl_val = (1u << 15) | loop_bit | format_bits | (p.addr >> 16);
 
     /* Sample address: SDAT-local offset in both HI and LO flow commands */
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_HI, 0, ctl_val };
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_LO, 0, p.addr & 0xFFFF };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_HI, (uint16_t)ctl_val };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_SA_LO, (uint16_t)(p.addr & 0xFFFF) };
 
     /* Loop registers: only emit when the descriptor has defined loop points.
      * These are 16-bit relative offsets from the Sample Start (SA). 
@@ -435,8 +435,8 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
         if (lsa > 0xFFFF) lsa = 0xFFFF;
         if (lea > 0xFFFE) lea = 0xFFFE; /* 0xFFFF is reserved/invalid for LEA */
 
-        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA, 0, lsa };
-        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA, 0, lea };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LSA, (uint16_t)lsa };
+        cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_LEA, (uint16_t)lea };
     }
 
     /* ADSR Pre-calculated Bitfields:
@@ -446,15 +446,15 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
     uint32_t d2r_d1r_val = ((uint32_t)(d1r & 0x1F) << 8) | (ar & 0x1F);
     uint32_t egh_rr_val  = ((uint32_t)(d2r & 0x1F) << 8) | ((uint32_t)(dl & 0x1F) << 3) | (rr & 0x1F);
 
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_D2R_D1R, 0, d2r_d1r_val };
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_EGH_RR,  0, egh_rr_val };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_D2R_D1R, (uint16_t)d2r_d1r_val };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_EGH_RR,  (uint16_t)egh_rr_val };
 
     /* Velocity -> Total Level: TL 0=loudest, 127=nearly silent. Invert vel. */
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_TOT_LVL, 0, (uint32_t)(127u - velocity) };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_TOT_LVL, (uint16_t)(127u - velocity) };
 
     /* Pan: MIDI 0-127 -> AICA DIPAN 5-bit (stored in bits [20:16] of PAN_VOL). */
     uint8_t aica_pan = (uint8_t)((midi_pan * 31u) / 127u);
-    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_PAN_VOL, 0, (uint32_t)aica_pan << 20 };
+    cmds[(*cmd_idx)++] = (afx_cmd_t){ timestamp, slot, AICA_REG_PAN_VOL, (uint16_t)((uint32_t)aica_pan << 20) };
 }
 typedef struct {
     afx_cmd_t cmd;
@@ -746,7 +746,7 @@ int main(int argc, char **argv) {
                                               channel_attack[chan], (uint8_t)15, (uint8_t)15, (uint8_t)rel, (uint8_t)0,
                                               vel_shaped, channel_pan[chan],
                                               flow_cmd_buffer, &flow_cmd_count);
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ current_ms, slot, AICA_REG_FNS_OCT, 0, aica_pitch_convert(ratio) };
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ current_ms, slot, AICA_REG_FNS_OCT, (uint16_t)aica_pitch_convert(ratio) };
                         slot_note_on_ms[slot] = current_ms;
                         slot_note_on_prog[slot] = prog;
                         slot_active[slot] = true;
@@ -765,7 +765,7 @@ int main(int argc, char **argv) {
                         if (off_ms > max_timestamp) max_timestamp = off_ms;
                         /* Emit Key Off (Bit 14) via SA_HI register */
                         uint32_t sa_hi_val = (instrument_bank[prog].addr >> 16) & 0x7F;
-                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ off_ms, slot, AICA_REG_SA_HI, 0, (1u << 14) | sa_hi_val };
+                        flow_cmd_buffer[flow_cmd_count++] = (afx_cmd_t){ off_ms, slot, AICA_REG_SA_HI, (uint16_t)((1u << 14) | sa_hi_val) };
                     }
                 } else if(status < 0xF0) { fgetc(f_mid); if(type != 0xD0) fgetc(f_mid); }
                 else if(status == 0xFF) { 

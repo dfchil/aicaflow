@@ -30,14 +30,14 @@ Detailed architecture diagrams and runtime memory-flow notes are maintained in `
 | :--- | :--- |
 | **Header (`afx_header_t`)** | 20-byte lean header containing magic, version, section count, and duration. |
 | **Section Table (`afx_section_entry_t[]`)** | Directory of typed chunks immediately following the header. |
-| **FLOW** | Array of `afx_cmd_t` entries: timestamp, slot, register, value. |
+| **FLOW** | Array of 8-byte `afx_cmd_t` entries: timestamp, slot, register, value. |
 | **SDES** | Array of `afx_sample_desc_t` entries with source ID, GM program, format, loop info, root note, sample rate, and offsets. |
 | **SDAT** | Raw ADPCM or PCM sample bytes packed back-to-back. |
 | **DSPM / DSPC / META** | Optional DSP and metadata payload sections. |
 
 Relevant format properties:
 
-- `AICAF_MAGIC = 0xA1CAF200`
+- `AICAF_MAGIC = 0xA1CAF100`
 - `AICAF_VERSION = 1`
 - The section table is accessed via implicit offset (`sizeof(afx_header_t)`).
 - `AFX_ALIGN32` is supported for DMA-safe section alignment.

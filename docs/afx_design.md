@@ -81,7 +81,7 @@ All section offsets are relative to file start.
 ### Header (`afx_header_t`)
 
 ```c
-#define AICAF_MAGIC    0xA1CAF200
+#define AICAF_MAGIC    0xA1CAF100
 #define AICAF_VERSION  1
 
 typedef struct {
@@ -137,8 +137,7 @@ typedef struct {
     uint32_t timestamp;  // absolute ms
     uint8_t  slot;
     uint8_t  reg;
-    uint16_t pad;
-    uint32_t value;
+    uint16_t value;
 } afx_cmd_t;
 ```
 

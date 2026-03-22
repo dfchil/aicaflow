@@ -10,7 +10,7 @@ static void test_struct_layout(void) {
     assert(sizeof(afx_header_t) == 20);
     assert(sizeof(afx_section_entry_t) == 24);
     assert(sizeof(afx_sample_desc_t) == 32);
-    assert(sizeof(afx_cmd_t) == 12);
+    assert(sizeof(afx_cmd_t) == 8);
 
     assert(AICAF_MAGIC == 0xA1CAF100u);
     assert(AICAF_VERSION == 1u);
@@ -22,7 +22,7 @@ static void test_struct_layout(void) {
     assert(offsetof(afx_cmd_t, timestamp) == 0u);
     assert(offsetof(afx_cmd_t, slot) == 4u);
     assert(offsetof(afx_cmd_t, reg) == 5u);
-    assert(offsetof(afx_cmd_t, value) == 8u);
+    assert(offsetof(afx_cmd_t, value) == 6u);
 }
 
 static void test_memory_layout_invariants(void) {

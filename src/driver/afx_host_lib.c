@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <afx/host.h>
-#include <afx/afx_driver.h>
+#include <afx/afx_driver_blob.h>
 
 
 /* KOS specific headers (simulated/assumed available in user's KOS setup) */

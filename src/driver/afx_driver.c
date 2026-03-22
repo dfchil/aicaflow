@@ -169,21 +169,21 @@ static inline void process_ipc_command(uint32_t cmd, uint32_t arg0) {
  */
 static inline void execute_cmd(const afx_cmd_t *cmd) {
     plr_state_ptr->reg_ptr = (uint32_t)(AICA_REG_BASE + ((uint32_t)cmd->slot << 7) + ((uint32_t)cmd->reg << 2));
-    plr_state_ptr->reg_val = cmd->value;
+    plr_state_ptr->reg_val = (uint32_t)cmd->value;
 
     /* SA_LO/HI contain absolute SPU addresses resolved from file-relative offsets. */
     switch (cmd->reg) {
         case AICA_REG_SA_LO:
-            plr_state_ptr->resolved_addr = afx_resolve_file_offset(plr_state_ptr->afx_base, cmd->value);
+            plr_state_ptr->resolved_addr = afx_resolve_file_offset(plr_state_ptr->afx_base, (uint32_t)cmd->value);
             plr_state_ptr->reg_val = plr_state_ptr->resolved_addr & 0xFFFF;
             break;
         case AICA_REG_SA_HI:
-            plr_state_ptr->resolved_addr = afx_resolve_file_offset(plr_state_ptr->afx_base, cmd->value);
+            plr_state_ptr->resolved_addr = afx_resolve_file_offset(plr_state_ptr->afx_base, (uint32_t)cmd->value);
             /* Bits [22:16] of absolute address go into play_ctrl Bits [6:0] */
             uint32_t val = (plr_state_ptr->resolved_addr >> 16) & 0x7F;
             /* Preserve existing flags (KeyOn/Loop/Format) if needed, 
                but usually the sequencer writes the whole control word. */
-            plr_state_ptr->reg_val = val;
+            plr_state_ptr->reg_val = (cmd->value & ~0x7Fu) | val;
             break;
         case AICA_REG_TOT_LVL:
             plr_state_ptr->reg_val = plr_state_ptr->tl_scale_lut[plr_state_ptr->reg_val & 0xFFu];

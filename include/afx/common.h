@@ -84,8 +84,7 @@ typedef struct {
     uint32_t timestamp;     /* Absolute time in ms */
     uint8_t  slot;
     uint8_t  reg;
-    uint16_t pad;
-    uint32_t value;
+    uint16_t value;
 } afx_cmd_t;
 
 /* IPC Command (16 bytes) */
