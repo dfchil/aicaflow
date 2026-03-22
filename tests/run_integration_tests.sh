@@ -19,7 +19,7 @@ INFOTMP="$ARTIFACT_DIR/test_suite_info.txt"
 echo "[integration] inspecting output"
 ./tools/afx_info "$AFTMP" input/wavetables.map > "$INFOTMP"
 
-grep -q "Magic:[[:space:]]*0xA1CAF200" "$INFOTMP"
+grep -q "Magic:[[:space:]]*0xA1CAF100" "$INFOTMP"
 grep -q "Version:[[:space:]]*1" "$INFOTMP"
 grep -q "Sample Descriptors" "$INFOTMP"
 grep -Eq "(Flow Command) Register Distribution" "$INFOTMP"

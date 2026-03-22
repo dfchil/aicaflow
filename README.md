@@ -37,7 +37,7 @@ Detailed architecture diagrams and runtime memory-flow notes are maintained in `
 
 Relevant format properties:
 
-- `AICAF_MAGIC = 0xA1CAF200`
+- `AICAF_MAGIC = 0xA1CAF100`
 - `AICAF_VERSION = 1`
 - The section table is accessed via implicit offset (`sizeof(afx_header_t)`).
 - `AFX_ALIGN32` is supported for DMA-safe section alignment.

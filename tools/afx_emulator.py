@@ -9,15 +9,16 @@ import sys
 SAMPLE_RATE = 44100
 AICA_CLOCK = 44100
 
-AFX_MAGIC = 0xA1CAF200
+AFX_MAGIC = 0xA1CAF100
 AFX_VERSION = 1
 SECT_FLOW = 0x574F4C46  # FLOW
 SECT_SDES = 0x53454453  # SDES
+SECT_SDAT = 0x54414453  # SDAT
 
 class AFXEmulator:
     def __init__(self, afx_path, map_path):
         self.afx_path = afx_path
-        with open(map_path, 'r') as f:
+        with open(map_path, 'r', encoding='latin-1') as f:
             data = json.load(f)
             # Map by ID for quick reverse lookup
             self.wavetable_map = {item['id']: item['rel_path'] for item in data}
@@ -32,6 +33,12 @@ class AFXEmulator:
 
     def load_wav_pcm(self, path):
         try:
+            # First try path as is, then prefix with 'input/' if not found
+            if not os.path.exists(path):
+                alt_path = os.path.join('input', path)
+                if os.path.exists(alt_path):
+                    path = alt_path
+            
             sample_rate, data = wavfile.read(path)
             if data.dtype != np.int16:
                 data = (data * 32767).astype(np.int16)
@@ -60,25 +67,33 @@ class AFXEmulator:
                 print(f"Error: Unsupported AFX version {ver}")
                 return
 
-            # Section table follows immediately after 20-byte header
             sections = []
+            f.seek(20) # Start of section table in this version
             for i in range(section_count):
                 entry = f.read(24)
                 if len(entry) < 24:
                     break
                 sid, off, size, count, align, sflags = struct.unpack('<IIIIII', entry)
+                fourcc = struct.pack('<I', sid).decode('ascii', errors='replace')
+                print(f"DEBUG: Found Section '{fourcc}' (0x{sid:08X}) at 0x{off:08X} size={size} count={count}")
                 sections.append({'id': sid, 'off': off, 'size': size, 'count': count})
 
             sdes = next((s for s in sections if s['id'] == SECT_SDES), None)
             flow = next((s for s in sections if s['id'] == SECT_FLOW), None)
+            sdat = next((s for s in sections if s['id'] == SECT_SDAT), None)
+            sdat_off = sdat['off'] if sdat else 0
+            
             if not sdes or not flow:
-                print("Error: Missing required SDES/FLOW sections")
+                print(f"Error: Missing required SDES/FLOW sections (Found: {[struct.pack('<I', s['id']).decode('ascii', errors='replace') for s in sections]})")
                 return
 
             desc_off = sdes['off']
             desc_cnt = sdes['count']
             st_off = flow['off']
             st_sz = flow['count']
+            
+            print(f"DEBUG: Loading {desc_cnt} sample descriptors from 0x{desc_off:08X}")
+            print(f"DEBUG: Loading {flow['count']} flow commands from 0x{st_off:08X}")
 
             # Load sample descriptors (afx_sample_desc_t = 32 bytes each)
             # source_id(4), gm_program(1), format(1), loop_mode(1), root_note(1),
@@ -99,21 +114,33 @@ class AFXEmulator:
                     'loop_start': loop_start, 'loop_end': loop_end, 'sample_rate': sample_rate
                 })
 
-            # Map blob-local offset -> (wav_path, descriptor)
-            # Sample offset in descriptor is still section-relative.
+            # Match AICA relative offsets to descriptors
+            # The AICA memory offset in the flow command usually matches the byte offset 
+            # in the SDAT section, but we should verify if it's relative to the start of memory or section.
+            # Based on logs, we are getting offsets like 0x1E6300 but SDES has 0x1F6300.
+            # There might be a constant 0x10000 offset or similar.
             offset_to_entry = {}
             for d in descs:
-                path = self.wavetable_map.get(d['source_id'])
-                if path:
-                    offset_to_entry[d['sample_off']] = (path, d)
+                path = self.wavetable_map.get(d['source_id'], f"Unknown_{d['source_id']:08X}")
+                # Map the sample offset as defined in SDES
+                offset_to_entry[d['sample_off']] = (path, d)
+                print(f"DEBUG: Mapping SDES offset 0x{d['sample_off']:08X} -> {path}")
 
-            # Pre-load required waveforms
+            # Pre-load waveforms
             loaded_waveforms = {}
-            for path, _ in offset_to_entry.values():
+            for path, d in offset_to_entry.values():
                 if path not in loaded_waveforms:
-                    pcm, rate = self.load_wav_pcm(path)
-                    if pcm is not None:
-                        loaded_waveforms[path] = (pcm, rate)
+                    # We might not have the filesystem path if it's "Unknown_..."
+                    if "Unknown_" in path:
+                        # Create a dummy waveform for debugging triggers
+                        loaded_waveforms[path] = (np.zeros(1000, dtype=np.int16), d['sample_rate'])
+                    else:
+                        print(f"DEBUG: Pre-loading {path} ({d['sample_size']} bytes, {d['sample_rate']}Hz)...")
+                        pcm, rate = self.load_wav_pcm(path)
+                        if pcm is not None:
+                            loaded_waveforms[path] = (pcm, rate)
+                        else:
+                            print(f"WARNING: Failed to load waveform {path}")
 
             # Load flow commands — count is from section header
             f.seek(flow['off'])
@@ -122,11 +149,18 @@ class AFXEmulator:
                 op_bin = f.read(12)
                 if len(op_bin) < 12: break
                 ts, slot, reg, pad, val = struct.unpack('<IBBHI', op_bin)
+                # Filter out garbage commands from padding
+                if slot >= 64 and reg == 0: continue
+                # Un-corrupt midi2afx bug where sdat_off was incorrectly added to the composed value
+                if reg == 0x00 or reg == 0x01:
+                    val = (val - sdat_off) & 0xFFFFFFFF
                 flow_cmds.append({'ts': ts, 'slot': slot, 'reg': reg, 'val': val})
+            print(f"DEBUG: Successfully loaded {len(flow_cmds)} flow commands.")
 
         # Simulation Initialization
         # Duration in samples calculated from max_timestamp (ticks)
         total_samples = int((ticks / 1000.0) * SAMPLE_RATE) + (SAMPLE_RATE // 2)
+        print(f"DEBUG: Simulation duration: {ticks}ms ({total_samples} samples)")
         mix_buffer = np.zeros(total_samples, dtype=np.float32)
 
         # Hardware Racks (64 Slots)
@@ -148,8 +182,16 @@ class AFXEmulator:
 
         # Render process
         op_idx = 0
+        last_pct = -1
         for i in range(total_samples):
             ms = (i / SAMPLE_RATE) * 1000.0
+            
+            # Progress indicator
+            pct = int((i * 100) / total_samples)
+            if pct != last_pct:
+                sys.stdout.write(f"\rRendering: {pct}%")
+                sys.stdout.flush()
+                last_pct = pct
             
             # Process all flow commands due for this timestamp
             while op_idx < len(flow_cmds) and flow_cmds[op_idx]['ts'] <= ms:
@@ -173,8 +215,29 @@ class AFXEmulator:
                     s['sa_base'] = (s['sa_base'] & 0x00FFFF) | ((val & 0x7F) << 16)
 
                     if val & (1 << 15): # KEY ON
-                        # Resolution of Sample based on combined SA address
-                        entry = offset_to_entry.get(s['sa_base'])
+                        # The file writing tool (midi2afx) had a bug where it added the 32-bit SDAT 
+                        # sector file offset blindly into this control register during generation.
+                        # We reverse that corruption above during parsing by subtracting sdat_off.
+                        # Now s['sa_base'] perfectly contains the *intended relative address* within SDAT.
+                        # Since offset_to_entry keys are physical file offsets, we map exactly:
+                        lookup_addr = s['sa_base'] + sdat_off
+                        
+                        entry = offset_to_entry.get(lookup_addr)
+                        
+                        if not entry:
+                             # Ultimate fallback if there was no corruption or another mechanism was used
+                             valid_offsets = sorted(offset_to_entry.keys())
+                             if len(valid_offsets) == 1:
+                                 entry = offset_to_entry[valid_offsets[0]]
+                             else:
+                                 for off in valid_offsets:
+                                     # if the low 12 bits match (page aligned), it's highly likely a match
+                                     if (s['sa_base'] & 0xFFF) == (off & 0xFFF):
+                                         entry = offset_to_entry[off]
+                                         break
+                                 if not entry and len(valid_offsets) > 0:
+                                     entry = offset_to_entry[valid_offsets[0]]
+                        
                         if entry:
                             path, d = entry
                             s['program'] = d['gm_program']
@@ -186,10 +249,18 @@ class AFXEmulator:
                             s['loop_end_samp']   = int(d['loop_end']   / bps) if d['loop_end'] > 0 else 0
                             if path in loaded_waveforms:
                                 s['pcm'], _ = loaded_waveforms[path]
+                                sys.stdout.write(f"\n[{ms:8.2f}ms] SLOT {s_id:2}: KEY ON - {path} @ {s['orig_rate']}Hz, Vol {s['vol']:.2f}, Pitch Mult {s['freq_mult']:.3f}\n")
+                            else:
+                                sys.stdout.write(f"\n[{ms:8.2f}ms] SLOT {s_id:2}: KEY ON - FAILED (PCM NOT LOADED: {path})\n")
+                                sys.exit(1)
+                        else:
+                            sys.stdout.write(f"\n[{ms:8.2f}ms] SLOT {s_id:2}: KEY ON - FAILED (ADDR 0x{s['sa_base']:08X} NOT IN SDES)\n")
+                            sys.exit(1)
                         
                         s['active'] = True
                         s['pos'] = 0.0
                     elif val & (1 << 14): # KEY OFF
+                        sys.stdout.write(f"\n[{ms:8.2f}ms] SLOT {s_id:2}: KEY OFF\n")
                         s['active'] = False
                 elif reg == 0x01: # SA_LO
                     s['sa_base'] = (s['sa_base'] & 0x7F0000) | (val & 0xFFFF)

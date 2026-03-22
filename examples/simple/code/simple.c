@@ -1,28 +1,9 @@
-#include <dc/maple/purupuru.h>
 #include <enDjinn/enj_enDjinn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <afx/afx_driver.h>
+#include <afx/afx_driver_blob.h>
 
-uint8_t wilhelm_adpcm_data[] = {
-#embed "../embeds/simple/sfx/ADPCM/Wilhelm_Scream.dca"
-};
-uint8_t wilhelm_pcm8_data[] = {
-#embed "../embeds/simple/sfx/PCM/8/Wilhelm_Scream.dca"
-};
-uint8_t wilhelm_pcm16_data[] = {
-#embed "../embeds/simple/sfx/PCM/16/Wilhelm_Scream.dca"
-};
-uint8_t clean_test_adpcm[] = {
-#embed "../embeds/simple/sfx/ADPCM/clean-audio-test-tone.dca"
-};
-uint8_t clean_test_pcm8[] = {
-#embed "../embeds/simple/sfx/PCM/8/clean-audio-test-tone.dca"
-};
-uint8_t clean_test_pcm16[] = {
-#embed "../embeds/simple/sfx/PCM/16/clean-audio-test-tone.dca"
-};
 
 typedef struct {
   struct {
@@ -35,25 +16,17 @@ typedef struct {
     uint32_t active_controller : 2;
     int32_t cursor_pos : 5;
     int32_t loaded_pattern : 5;
-    uint8_t pan : 8;
-    uint32_t reserved : 12;
+    uint32_t reserved : 20;
   };
-  sfxhnd_t sounds[6];
 } SPE_state_t;
 
 static void play_sfx(void* data) {
-  SPE_state_t* state = (SPE_state_t*)data;
-  if (state->sounds[state->cursor_pos] != SFXHND_INVALID) {
-    enj_sound_play(state->sounds[state->cursor_pos], 192, state->pan);
-  }
+  // SPE_state_t* state = (SPE_state_t*)data;
 }
 static const SFX_menu_entry_t sfx_catalog[] = {
-    {.name = "Wilhelm scream, ADPCM encoded", .on_press_A = play_sfx},
-    {.name = "Wilhelm scream, PCM 8bit encoded", .on_press_A = play_sfx},
-    {.name = "Wilhelm scream, PCM 16bit encoded", .on_press_A = play_sfx},
-    {.name = "Clean test tone, ADPCM encoded", .on_press_A = play_sfx},
-    {.name = "Clean test tone, PCM 8bit encoded", .on_press_A = play_sfx},
-    {.name = "Clean test tone, PCM 16bit encoded", .on_press_A = play_sfx},
+    {.name = "Bach - Cello Suite No. 1 in G Major", .on_press_A = play_sfx},
+    {.name = "Chopin - Nocturnes Opus 27, No. 1 in C# Minor", .on_press_A = play_sfx},
+    {.name = "Grieg - In The Hall of The Mountain King", .on_press_A = play_sfx},
     {.name = "Exit example", .on_press_A = enj_state_flag_shutdown},
 };
 static const int num_sfx_menu_entries = sizeof(sfx_catalog) / sizeof(sfx_catalog[0]);
@@ -63,29 +36,13 @@ void render(void* data) {
   SPE_state_t* state = (SPE_state_t*)data;
   enj_qfont_color_set(0x14, 0xaf, 255); /* Light Blue */
   enj_font_scale_set(3);
-  const char* title = "Sound Playback Example";
+  const char* title = "Music Playback Example";
   int twidth = enj_font_string_width(title, enj_qfont_get_header());
   int textpos_x = (vid_mode->width - twidth) >> 1;
   int textpos_y = 4;
   enj_qfont_write(title, textpos_x, textpos_y, PVR_LIST_PT_POLY);
   enj_font_scale_set(1);
   textpos_y += 4 * enj_qfont_get_header()->line_height;
-
-  /* show pan */
-  enj_qfont_color_set(255, 255, 255); /* White */
-  enj_qfont_write("Current pan:", MARGIN_LEFT, textpos_y, PVR_LIST_PT_POLY);
-  textpos_y += enj_qfont_get_header()->line_height;
-  char pan_str[7];
-  snprintf(pan_str, sizeof(pan_str), "<%d>", state->pan - 128);
-  int8_t signed_pan = (int8_t)(state->pan - 128);
-  uint8_t red = signed_pan > 0 ? 0 : 127 + abs(signed_pan);
-  uint8_t green = signed_pan < 0 ? 0 : 127 + abs(signed_pan);
-  uint8_t blue = 255 - ((abs(signed_pan) - 1) << 1);
-
-  enj_qfont_color_set(red, green, blue);
-  enj_qfont_write(pan_str, (vid_mode->width >> 1) + (signed_pan << 1),
-                  textpos_y, PVR_LIST_PT_POLY);
-  textpos_y = (vid_mode->height >> 4) * 4;
 
   /* show menu  */
   enj_qfont_color_set(255, 255, 255); /* White */
@@ -120,7 +77,7 @@ void render(void* data) {
   textpos_y += enj_qfont_get_header()->line_height;
   enj_qfont_write("Press A to choose", textpos_x, textpos_y, PVR_LIST_PT_POLY);
   textpos_y += enj_qfont_get_header()->line_height;
-  enj_qfont_write(longest_line, textpos_x, textpos_y, PVR_LIST_PT_POLY);
+  // enj_qfont_write(longest_line, textpos_x, textpos_y, PVR_LIST_PT_POLY);
 }
 
 void main_mode_updater(void* data) {
@@ -142,9 +99,6 @@ void main_mode_updater(void* data) {
         ENJ_BUTTON_DOWN_THIS_FRAME) {
       sfx_catalog[state->cursor_pos].on_press_A(data);
     }
-    if (ctrl_states[state->active_controller]->button.X == ENJ_BUTTON_DOWN) {
-      state->pan = (uint8_t)(ctrl_states[state->active_controller]->joyx + 128);
-    }
   } while (0);
   enj_render_list_add(PVR_LIST_PT_POLY, render, data);
 }
@@ -157,17 +111,7 @@ int main(__unused int argc, __unused char** argv) {
   }
   SPE_state_t rat_state = {
       .cursor_pos = 0,
-      .pan = 128,
-      .sounds =
-          {
-              enj_sound_dca_load_blob(wilhelm_adpcm_data),
-              enj_sound_dca_load_blob(wilhelm_pcm8_data),
-              enj_sound_dca_load_blob(wilhelm_pcm16_data),
-              enj_sound_dca_load_blob(clean_test_adpcm),
-              enj_sound_dca_load_blob(clean_test_pcm8),
-              enj_sound_dca_load_blob(clean_test_pcm16),
-          },
-  };
+    };
   enj_mode_t main_mode = {
       .name = "Main Mode",
       .mode_updater = main_mode_updater,

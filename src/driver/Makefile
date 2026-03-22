@@ -27,7 +27,7 @@ BINDIR= ../../bin
 ELF	 = afx_driver.elf
 
 DRIVER=afx_driver.bin
-DRIVER_INCLUDE := ../../include/afx/afx_driver.h
+DRIVER_INCLUDE := ../../include/afx/afx_driver_blob.h
 
 HOSTLIB=$(BINDIR)/afx_host.a
 
