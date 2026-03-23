@@ -38,6 +38,7 @@ reg_stat_t stats[] = {
     { AICA_REG_D2R_D1R, "D2R_D1R",  0 },
     { AICA_REG_EGH_RR,  "EGH_RR",   0 },
     { AICA_REG_AR_SR,   "AR_SR",    0 },
+    { AICA_REG_LNK_DL,  "LNK_DL",   0 },
     { AICA_REG_FNS_OCT, "FNS_OCT",  0 },
     { AICA_REG_TOT_LVL, "TOT_LVL",  0 },
     { AICA_REG_PAN_VOL, "PAN_VOL",  0 },
@@ -118,12 +119,12 @@ int main(int argc, char **argv) {
     uint32_t source_map_off   = s_sdes->offset;
     uint32_t source_map_count = s_sdes->count;
     uint32_t flow_data_off    = s_flow->offset;
-    uint32_t flow_data_size   = s_flow->count;
+    uint32_t flow_data_size   = s_flow->size;
     uint32_t total_ticks      = head.total_ticks;
 
-    uint32_t flow_cmd_bytes = flow_data_size * sizeof(afx_cmd_t);
+    uint32_t flow_cmd_count = s_flow->count;
     double sample_pct = (double)sample_data_size / total_size * 100.0;
-    double flow_cmd_pct = (double)flow_cmd_bytes / total_size * 100.0;
+    double flow_cmd_pct = (double)flow_data_size / total_size * 100.0;
 
     uint32_t total_sec = total_ticks / 1000;
     uint32_t mm = total_sec / 60;
@@ -135,11 +136,12 @@ int main(int argc, char **argv) {
     printf("Magic:      0x%08X\n", head.magic);
     printf("Version:    %u\n", head.version);
     printf("Sections:   %u\n", head.section_count);
-    printf("FLOW Offset: 0x%02X (%u)\n", flow_data_off, flow_data_off);
-    printf("SDES Offset: 0x%02X (%u)\n", source_map_off, source_map_off);
-    printf("SDAT Offset: 0x%02X (%u)\n", sample_data_off, sample_data_off);
+    printf("FLOW Offset: 0x%X (%u)\n", flow_data_off, flow_data_off);
+    printf("SDES Offset: 0x%X (%u)\n", source_map_off, source_map_off);
+    printf("SDAT Offset: 0x%X (%u)\n", sample_data_off, sample_data_off);
     printf("Samples:    %u bytes (%.1f%%) (at offset 0x%X)\n", sample_data_size, sample_pct, sample_data_off);
-    printf("Flow Cmds:  %u entries, %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_bytes, flow_cmd_pct, flow_data_off);
+    printf("Flow Data:  %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_pct, flow_data_off);
+    printf("Flow Cmds:  %u entries\n", flow_cmd_count);
     printf("--------------------------------------\n");
 
     // Scan flow commands to gather register usage stats and correlate sample address usage with sample descriptors
@@ -165,51 +167,62 @@ int main(int argc, char **argv) {
 
         if (flow_data_size > 0) {
             fseek(f, flow_data_off, SEEK_SET);
-            for (uint32_t i = 0; i < flow_data_size; i++) {
-                afx_cmd_t cmd;
-                if (fread(&cmd, 1, sizeof(cmd), f) != sizeof(cmd)) break;
+            uint32_t bytes_read = 0;
+            while (bytes_read < flow_data_size) {
+                uint32_t ts;
+                uint16_t bits;
+                if (fread(&ts, 4, 1, f) != 1) break;
+                bytes_read += 4;
+                if (fread(&bits, 2, 1, f) != 1) break;
+                bytes_read += 2;
+                
+                uint8_t slot = bits & 0x3F;
+                uint8_t offset = (bits >> 6) & 0x1F;
+                uint8_t length = (bits >> 11) & 0x1F;
+                
+                for (int l = 0; l < length; l++) {
+                    uint16_t val;
+                    if (fread(&val, 2, 1, f) != 1) break;
+                    bytes_read += 2;
+                    uint8_t reg = offset + l;
 
-                /* SA_HI and SA_LO both store the full file-relative address */
-                if (cmd.reg == AICA_REG_SA_LO) {
-                    slot_addr[cmd.slot] = cmd.value;
-                    slot_has_addr[cmd.slot] = true;
-                }
-
-                bool found = false;
-                /* Note: In the new architecture, Key On/Off is handled by AICA_REG_SA_HI (Index 0)
-                   Bit 15: KYON, Bit 14: KYOFF */
-                if (cmd.reg == AICA_REG_SA_HI) {
-                    uint32_t control_bits = cmd.value & ((1u << 15) | (1u << 14));
-                    if (control_bits & (1u << 15)) {
-                        stats[0].count++; /* KYON */
-                        found = true;
-                        if (descs && addr_counts && slot_has_addr[cmd.slot]) {
-                            for (uint32_t s = 0; s < source_map_count; s++) {
-                                if (descs[s].sample_off == slot_addr[cmd.slot]) {
-                                    addr_counts[s]++;
-                                    if (sample_formats && sample_formats[s] < 0)
-                                        sample_formats[s] = (int32_t)descs[s].format;
-                                    break;
-                                }
-                            }
+                    /* Register tracking logic... */
+                    bool found = false;
+                    if (reg == AICA_REG_SA_HI) {
+                        uint32_t control_bits = val & ((1u << 15) | (1u << 14));
+                        if (control_bits & (1u << 15)) {
+                            stats[0].count++; /* KYON */
                         }
-                    } else if (control_bits & (1u << 14)) {
-                        stats[1].count++; /* KYOFF */
+                        if (control_bits & (1u << 14)) {
+                            stats[1].count++; /* KYOFF */
+                        }
+                        stats[2].count++; /* Count the register write itself */
                         found = true;
+                    } else {
+                        if (reg == AICA_REG_SA_LO) {
+                            slot_addr[slot] = val;
+                            slot_has_addr[slot] = true;
+                        }
+                        for (int j = 3; stats[j].reg != 0xFF; j++) {
+                            if (stats[j].reg == reg) { stats[j].count++; found = true; break; }
+                        }
                     }
-                    /* Always count the SA_HI/CTL register write itself in stats[2] */
-                    stats[2].count++;
-                } else {
-                    for (int j = 3; stats[j].reg != 0xFF; j++) {
-                        if (stats[j].reg == cmd.reg) { stats[j].count++; found = true; break; }
+                    if (!found) {
+                        stats[13].count++; /* Index 13 is "OTHER" */
                     }
                 }
-                if (!found && cmd.reg != AICA_REG_SA_HI) stats[12].count++; /* Index 12 is "OTHER" */
+                
+                if (length & 1) {
+                    uint16_t pad;
+                    if (fread(&pad, 2, 1, f) == 1) {
+                        bytes_read += 2;
+                    }
+                }
             }
         }
 
         printf("Flow Command Register Distribution:\n");
-        for (int i = 0; i < 13; i++) {
+        for (int i = 0; i < 14; i++) {
             if (stats[i].count > 0) {
                 if (stats[i].reg != 0xFF && stats[i].reg != 0xFE && stats[i].reg != 0xFD)
                     printf("  [0x%02X] %-10s : %u\n", stats[i].reg, stats[i].name, stats[i].count);

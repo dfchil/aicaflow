@@ -28,14 +28,14 @@ Current layout constants (from `include/afx/common.h` and `driver.h`):
 - `AFX_MEM_CLOCKS = 0x001FFFE0`
 - `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (`sizeof(afx_ipc_status_t)=32`, aligned)
 - `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (`AFX_IPC_QUEUE_SZ=0x0400`)
-- `AFX_PLAYER_STATE_ADDR = 0x001FFA60` (`sizeof(afx_player_state_t)=340`, aligned down to 32-byte boundary)
+- `AFX_PLAYER_STATE_ADDR = 0x001FF980` (`sizeof(afx_player_state_t)=552`, aligned down to 32-byte boundary)
 
 Addresses are derived by macros, not hardcoded constants:
 - `AFX_IPC_STATUS_ADDR = ((AFX_MEM_CLOCKS - sizeof(afx_ipc_status_t)) & ~31)`
 - `AFX_IPC_CMD_QUEUE_ADDR = (AFX_IPC_STATUS_ADDR - AFX_IPC_QUEUE_SZ)`
 - `AFX_PLAYER_STATE_ADDR = ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_player_state_t)) & ~31)`
 
-The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_player_state_t` at a fixed high-memory address to avoid stack usage.
+The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_player_state_t` at a fixed high-memory address. This struct now includes a small reserved stack for the ARM7 compiler to use for local variables and spills, protected by a 32-bit canary.
 
 ```mermaid
 graph TD
@@ -44,18 +44,18 @@ graph TD
 
         CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
 
-        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FFA60 - 0x001FFFE0"]
+        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FF980 - 0x001FFFE0"]
             direction TB
             STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t, 32 bytes)"]
             QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
-            PLAYER["<b>Player State</b><br/>0x001FFA60 - 0x001FFBB3<br/>(afx_player_state_t, 340 bytes)"]
+            PLAYER["<b>Player State & Stack</b><br/>0x001FF980 - 0x001FFBAF<br/>(afx_player_state_t, 552 bytes)"]
             STATUS --- QUEUE
             QUEUE --- PLAYER
         end
 
         CLOCKS --- IPC_BLOCK
         IPC_BLOCK --- DYNAMIC
-        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FFA5F"]
+        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FF97F"]
         DYNAMIC --- DRIVER
         DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 ~2KB"]
     end
@@ -132,14 +132,40 @@ typedef struct {
 
 ### Flow Command Entry (`afx_cmd_t`)
 
+AFX v2 uses a variable-length command structure to support "burst" writes to consecutive AICA registers.
+
 ```c
 typedef struct {
-    uint32_t timestamp;  // absolute ms
-    uint8_t  slot;
-    uint8_t  reg;
-    uint16_t value;
+    uint32_t timestamp;     /* Absolute time in ms */
+    struct {
+      uint16_t slot : 6;    /* AICA voice slot (0-63) */
+      uint16_t offset : 5;  /* Register offset (0-31) */
+      uint16_t length : 5;  /* Number of consecutive 16-bit values (1-31) */
+    };
+    uint16_t values[];      /* Payload: length * 2 bytes */
 } afx_cmd_t;
 ```
+
+**Memory Layout:**
+- **Header**: 6 bytes (4 bytes timestamp + 2 bytes packed metadata).
+- **Payload**: `length * 2` bytes.
+- **Alignment**: Every command is padded to a **4-byte boundary**. If `length` is odd (1, 3, 5...), 2 bytes of zero padding follow the payload.
+
+**Example: Note-On Burst (18 bytes total)**
+- `timestamp`: Current time
+- `slot`: target voice
+- `offset`: 0 (`AICA_REG_SA_HI`)
+- `length`: 6
+- `values`: [SA_HI, SA_LO, LSA, LEA, D2R_D1R, EGH_RR]
+- *No padding needed (6 is even)*.
+
+**Example: Single Value Update (12 bytes total)**
+- `timestamp`: Current time
+- `slot`: target voice
+- `offset`: 13 (`AICA_REG_TOT_LVL`)
+- `length`: 1
+- `values`: [new_tl_volume]
+- **Padding**: 2 bytes (to reach 4-byte alignment).
 
 ---
 
@@ -240,7 +266,7 @@ Implemented host helpers:
 - `afx_upload_and_init_firmware`
 
 Firmware upload/init behavior:
-- upload firmware at requested SPU address
+- upload firmware at SPU address 0x0
 - write 32-byte aligned dynamic-base marker immediately after firmware size
 - clear queue/player/status control blocks
 - initialize allocator cursor to computed dynamic base

@@ -3,9 +3,6 @@
 
 include $(KOS_BASE)/Makefile.rules
 
-
-AS	  = $(DC_ARM_AS) # Using gcc as assembler wrapper for crt0
-
 # Driver configuration
 # -marm: Use ARM instruction set (ARM7DI)
 # -mcpu=arm7di: Specify the processor found in the AICA
@@ -23,13 +20,13 @@ OBJS	= afx_driver.o
 CRT0_S  = crt0.s
 CRT0_O  = crt0.o
 
-BINDIR= ../../bin
+LIBDIR= ../../lib
 ELF	 = afx_driver.elf
 
 DRIVER=afx_driver.bin
 DRIVER_INCLUDE := ../../include/afx/afx_driver_blob.h
 
-HOSTLIB=$(BINDIR)/afx_host.a
+HOSTLIB=$(LIBDIR)/afx_host.a
 
 all: $(HOSTLIB)
 
@@ -50,7 +47,7 @@ $(DRIVER_INCLUDE): $(DRIVER)
 	$(KOS_BASE)/utils/bin2c/bin2c $< $@ afx_driver
 
 $(HOSTLIB): afx_host_lib.c $(DRIVER_INCLUDE)
-	@mkdir -p $(BINDIR)
+	@mkdir -p $(LIBDIR)
 	$(KOS_CC) $(KOS_CFLAGS) -I../../include -c $< -o $@
 
 clean:

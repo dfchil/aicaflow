@@ -9,25 +9,15 @@
 typedef struct {
     uint32_t afx_base;         /* Absolute SPU address of uploaded .afx */
     uint32_t flow_ptr;         /* afx_base + FLOW section offset */
+    uint32_t flow_size;        /* FLOW section byte size */
     uint32_t flow_count;       /* FLOW section entry count */
-    uint32_t flow_idx;         /* Current flow command index */
+    uint32_t flow_idx;         /* Current flow byte offset from flow_ptr */
     uint32_t next_event_tick;  /* Timestamp of next command */
     uint32_t is_playing;       /* Status flag */
     uint32_t loop_count;       /* Loop iteration count */
-    /* Scratch slots to avoid stack locals in hot loops */
-    uint32_t q_tail_latch;
-    uint32_t q_cmd;
-    uint32_t q_arg0;
-    uint32_t q_arg1;
-    uint32_t q_arg2;
-    uint32_t seek_target;
-    uint32_t flow_stream_ptr;
-    uint32_t current_hw;
-    uint32_t hw_delta;
-    uint32_t reg_ptr;
-    uint32_t reg_val;
-    uint32_t resolved_addr;
-    uint32_t next_cmd_ptr;
+    /* Small reserved stack space to allow for caller-save registers / small spills */
+    uint32_t stack_canary;     /* Overflow protection word (0xDEADBEEF) */
+    uint32_t mini_stack[64];
     /* Per-volume TL scaling LUT to keep execute path multiply-free. */
     uint8_t tl_scale_lut[256];
     uint32_t tl_lut_volume;
@@ -47,7 +37,7 @@ typedef struct {
 
 /* Guard memory-map critical struct sizes at compile time. */
 _Static_assert(sizeof(afx_ipc_status_t) == 32u, "afx_ipc_status_t size changed; update memory layout/docs");
-_Static_assert(sizeof(afx_player_state_t) == 340u, "afx_player_state_t size changed; update memory layout/docs");
+_Static_assert(sizeof(afx_player_state_t) == 552u, "afx_player_state_t size changed; update memory layout/docs");
 
 #pragma pack(pop)
 
@@ -78,15 +68,24 @@ static inline uint32_t afx_scale_total_level(uint32_t tl, uint32_t volume) {
     return 255u - scaled;
 }
 
-static inline uint32_t afx_cmd_lower_bound_by_tick(const afx_cmd_t *stream, uint32_t count, uint32_t target_tick) {
-    uint32_t lo = 0;
-    uint32_t hi = count;
-    while (lo < hi) {
-        uint32_t mid = lo + ((hi - lo) >> 1);
-        if (stream[mid].timestamp < target_tick) lo = mid + 1;
-        else hi = mid;
+static inline uint32_t afx_cmd_lower_bound_by_offset(const uint8_t *stream, uint32_t size, uint32_t count, uint32_t target_tick) {
+    /* Variable-length streams cannot be binary searched by offset directly.
+       We skip ahead based on the command size. */
+    uint32_t curr_ptr = 0;
+    uint32_t curr_idx = 0;
+    while (curr_idx < count && curr_ptr < size) {
+        const afx_cmd_t *cmd = (const afx_cmd_t *)(stream + curr_ptr);
+        if (cmd->timestamp >= target_tick) return curr_ptr;
+        
+        uint32_t cmd_num_vals = cmd->length;
+        uint32_t cmd_size = 6 + (cmd_num_vals * 2);
+        // Commands are 4-byte aligned in the stream
+        cmd_size = (cmd_size + 3) & ~3;
+        
+        curr_ptr += cmd_size;
+        curr_idx++;
     }
-    return lo;
+    return curr_ptr;
 }
 
 #endif /* AFX_DRIVER_H */

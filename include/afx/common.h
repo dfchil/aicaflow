@@ -82,9 +82,12 @@ typedef struct {
 /* Flow command (8 bytes) */
 typedef struct {
     uint32_t timestamp;     /* Absolute time in ms */
-    uint8_t  slot;
-    uint8_t  reg;
-    uint16_t value;
+    struct {
+      uint16_t slot : 6;    /* AICA voice slot (0-63) */
+      uint16_t offset  : 5; /* 0-16 */
+      uint16_t length : 5;     /* 1-17 num writes */
+    };
+    uint16_t values[];
 } afx_cmd_t;
 
 /* IPC Command (16 bytes) */
