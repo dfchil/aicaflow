@@ -11,39 +11,42 @@ static void test_struct_layout(void) {
     assert(sizeof(afx_header_t) == 20);
     assert(sizeof(afx_section_entry_t) == 24);
     assert(sizeof(afx_sample_desc_t) == 32);
+    assert(sizeof(afx_meta_t) == 16);
     /* Variable-length command header is 6 bytes + values array */
     assert(sizeof(afx_cmd_t) == 6u); 
 
     assert(AICAF_MAGIC == 0xA1CAF100u);
     assert(AICAF_VERSION == 1u);
-    assert(AICAF_CMD_SEEK == 5u);
+    assert(AFX_META_VERSION == 1u);
+    assert(AICAF_CMD_SEEK_FLOW == 6u);
     assert(AFX_SECT_FLOW == 0x574F4C46u);
     assert(AFX_SECT_SDAT == 0x54414453u);
+    assert(AFX_SECT_META == 0x4154454Du);
 
     /* Packed-flow command layout is part of the file ABI. */
     assert(offsetof(afx_cmd_t, timestamp) == 0u);
 }
 
-static void test_player_state_abi(void) {
-    /* Ensure the player state structure matches the 552-byte locked ABI */
-    assert(sizeof(afx_player_state_t) == 552u);
-    
-    /* Verify stack canary is positioned between next_event_tick and mini_stack */
-    assert(offsetof(afx_player_state_t, stack_canary) == 32u);
-    assert(offsetof(afx_player_state_t, mini_stack) == 36u);
-    
-    /* Verify LUT address (post-stack) */
-    assert(offsetof(afx_player_state_t, tl_scale_lut) == 292u);
+static void test_driver_state_abi(void) {
+    /* Driver runtime state now includes list links + canary + mini stack. */
+    assert(sizeof(afx_driver_state_t) == 268u);
+    assert(offsetof(afx_driver_state_t, active_flows_head) == 0u);
+    assert(offsetof(afx_driver_state_t, active_flows_tail) == 4u);
+    assert(offsetof(afx_driver_state_t, stack_canary) == 8u);
+    assert(offsetof(afx_driver_state_t, mini_stack) == 12u);
+
+    /* Flow state carries optional per-flow LUT pointer. */
+    assert(offsetof(afx_flow_state_t, tl_scale_lut_ptr) == 40u);
 }
 
 static void test_memory_layout_invariants(void) {
     /* Reserved control blocks should be naturally aligned and ordered high->low. */
-    assert((AFX_IPC_STATUS_ADDR & 31u) == 0u);
-    assert((AFX_PLAYER_STATE_ADDR & 31u) == 0u);
+    assert((AFX_IPC_CONTROL_ADDR & 31u) == 0u);
+    assert((AFX_DRIVER_STATE_ADDR & 31u) == 0u);
     assert((AFX_IPC_CMD_QUEUE_ADDR & 31u) == 0u);
 
-    assert(AFX_IPC_STATUS_ADDR > AFX_IPC_CMD_QUEUE_ADDR);
-    assert(AFX_IPC_CMD_QUEUE_ADDR > AFX_PLAYER_STATE_ADDR);
+    assert(AFX_IPC_CONTROL_ADDR > AFX_IPC_CMD_QUEUE_ADDR);
+    assert(AFX_IPC_CMD_QUEUE_ADDR > AFX_DRIVER_STATE_ADDR);
 
     /* Queue capacity must match its byte block and element size. */
     assert((AFX_IPC_QUEUE_SZ % sizeof(afx_ipc_cmd_t)) == 0u);
@@ -119,7 +122,7 @@ static void test_seek_lower_bound(void) {
 
 int main(void) {
     test_struct_layout();
-    test_player_state_abi();
+    test_driver_state_abi();
     test_memory_layout_invariants();
     test_scale_total_level();
     test_seek_lower_bound();

@@ -5,46 +5,65 @@
 
 #pragma pack(push, 1)
 
-/* ARM7 Player State (Relocated near IPC region; size depends on fields below) */
-typedef struct {
+/* Flow-level flags (afx_flow_state_t.flags) */
+#define AFX_FLOW_FLAG_SAMPLE_ADDRS_ABSOLUTE 0x00000001u
+
+/* Flow State (one per active .afx stream; linked into active-list) */
+typedef struct afx_flow_state {
+    /* Doubly-linked list pointers */
+    uint32_t prev_ptr;         /* SPU address of previous flow (0 if head) */
+    uint32_t next_ptr;         /* SPU address of next flow (0 if tail) */
+    
+    /* Stream data */
     uint32_t afx_base;         /* Absolute SPU address of uploaded .afx */
     uint32_t flow_ptr;         /* afx_base + FLOW section offset */
     uint32_t flow_size;        /* FLOW section byte size */
     uint32_t flow_count;       /* FLOW section entry count */
-    uint32_t flow_idx;         /* Current flow byte offset from flow_ptr */
+    uint32_t flow_idx;         /* Current flow command index */
     uint32_t next_event_tick;  /* Timestamp of next command */
-    uint32_t is_playing;       /* Status flag */
+    
+    /* Playback control */
+    uint32_t is_playing;       /* AFX_FLOW_STOPPED/PLAYING/PAUSED/DRAINING */
     uint32_t loop_count;       /* Loop iteration count */
-    /* Small reserved stack space to allow for caller-save registers / small spills */
-    uint32_t stack_canary;     /* Overflow protection word (0xDEADBEEF) */
-    uint32_t mini_stack[64];
-    /* Per-volume TL scaling LUT to keep execute path multiply-free. */
-    uint8_t tl_scale_lut[256];
-    uint32_t tl_lut_volume;
-} afx_player_state_t;
+    uint32_t tl_scale_lut_ptr; /* Optional 256-byte TL LUT in AICA RAM (0=disabled) */
+    uint64_t assigned_channels; /* Bitmask of channels assigned to this flow */
+    uint32_t required_channels; /* Flow-local channels needed by this file */
+    uint8_t channel_map[64];   /* File-local slot -> assigned hardware channel */
+    uint32_t flags;            /* Reserved for future use */
+} afx_flow_state_t;
 
-/* IPC Status (32-byte aligned high-RAM block; address derived by AFX_IPC_STATUS_ADDR) - 32 bytes */
+/* Global Driver State (runtime + stack canary). */
+typedef struct {
+    uint32_t active_flows_head;  /* SPU address of first active flow (0 if empty) */
+    uint32_t active_flows_tail;  /* SPU address of last active flow (0 if empty) */
+    uint32_t stack_canary;       /* Stack overflow detection (0xDEADBEEF) */
+    uint32_t mini_stack[64];     /* Small execution stack */
+} afx_driver_state_t;
+
+/* IPC Control Block (32 bytes, high-RAM) */
 typedef struct {
     uint32_t magic;         /* AICAF_MAGIC */
-    uint32_t arm_status;    /* 0=Idle, 1=Playing, 2=Paused, 3=Error */
-    uint32_t current_tick;  /* Current playback tick */
-    uint32_t flow_pos;      /* Offset into flow-command stream */
-    uint32_t volume;        /* Music volume (0-255) */
+    uint32_t arm_status;    /* 0=Idle, 1=Playing, 3=Error */
+    uint32_t current_tick;  /* Current global playback tick (shared by all flows) */
+    uint32_t volume;        /* Global music volume (0-255) */
     uint32_t q_head;        /* SH4 producer index */
     uint32_t q_tail;        /* ARM7 consumer index */
-    uint32_t reserved;
-} afx_ipc_status_t;
+    uint32_t completed_flow_addr;   /* Last flow SPU addr completed by ARM7 */
+    uint32_t completed_flow_seq;    /* Completion sequence number (monotonic) */
+} afx_ipc_control_t;
 
-/* Guard memory-map critical struct sizes at compile time. */
-_Static_assert(sizeof(afx_ipc_status_t) == 32u, "afx_ipc_status_t size changed; update memory layout/docs");
-_Static_assert(sizeof(afx_player_state_t) == 552u, "afx_player_state_t size changed; update memory layout/docs");
+/* Guard struct sizes at compile time. */
+_Static_assert(sizeof(afx_ipc_control_t) == 32u, "afx_ipc_control_t size changed");
+_Static_assert(sizeof(afx_flow_state_t) <= 128u, "afx_flow_state_t exceeds 128 bytes");
+_Static_assert(sizeof(afx_driver_state_t) == 268u, "afx_driver_state_t size changed");
 
 #pragma pack(pop)
 
 /* Memory Map Addresses */
-#define AFX_IPC_STATUS_ADDR     ((AFX_MEM_CLOCKS - sizeof(afx_ipc_status_t)) & ~31)
-#define AFX_IPC_CMD_QUEUE_ADDR  (AFX_IPC_STATUS_ADDR - AFX_IPC_QUEUE_SZ)
-#define AFX_PLAYER_STATE_ADDR   ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_player_state_t)) & ~31)
+#define AFX_IPC_CONTROL_ADDR    ((AFX_MEM_CLOCKS - sizeof(afx_ipc_control_t)) & ~31)
+#define AFX_IPC_CMD_QUEUE_ADDR  (AFX_IPC_CONTROL_ADDR - AFX_IPC_QUEUE_SZ)
+#define AFX_DRIVER_STATE_ADDR   ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_driver_state_t)) & ~31)
+#define AFX_FLOW_POOL_START     ((AFX_DRIVER_STATE_ADDR - 8192) & ~31)  /* Pool for flow states */
 
 #define AFX_IPC_QUEUE_CAPACITY  (AFX_IPC_QUEUE_SZ / sizeof(afx_ipc_cmd_t))
 
@@ -78,7 +97,7 @@ static inline uint32_t afx_cmd_lower_bound_by_offset(const uint8_t *stream, uint
         if (cmd->timestamp >= target_tick) return curr_ptr;
         
         uint32_t cmd_num_vals = cmd->length;
-        uint32_t cmd_size = 6 + (cmd_num_vals * 2);
+        uint32_t cmd_size = 6 + (cmd_num_vals << 1);
         // Commands are 4-byte aligned in the stream
         cmd_size = (cmd_size + 3) & ~3;
         

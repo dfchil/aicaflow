@@ -45,6 +45,20 @@ reg_stat_t stats[] = {
     { 0xFF,             "OTHER",    0 }
 };
 
+static bool decode_slot_payload(uint8_t offset, uint8_t length,
+                                const uint16_t *values,
+                                aica_chnl_packed_t *out) {
+    if (offset != AICA_REG_SA_HI || length == 0 || !values || !out) {
+        return false;
+    }
+
+    const uint8_t max_words = (uint8_t)(sizeof(*out) / sizeof(uint16_t));
+    uint8_t copy_words = (length < max_words) ? length : max_words;
+    memset(out, 0, sizeof(*out));
+    memcpy(out, values, (size_t)copy_words * sizeof(uint16_t));
+    return true;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("Usage: %s <file.aicaflow> [wavetables.map]\n", argv[0]);
@@ -100,11 +114,13 @@ int main(int argc, char **argv) {
     const afx_section_entry_t *s_flow = NULL;
     const afx_section_entry_t *s_sdes = NULL;
     const afx_section_entry_t *s_sdat = NULL;
+    const afx_section_entry_t *s_meta = NULL;
 
     for (uint32_t i = 0; i < head.section_count; i++) {
         if (sections[i].id == AFX_SECT_FLOW) s_flow = &sections[i];
         if (sections[i].id == AFX_SECT_SDES) s_sdes = &sections[i];
         if (sections[i].id == AFX_SECT_SDAT) s_sdat = &sections[i];
+        if (sections[i].id == AFX_SECT_META) s_meta = &sections[i];
     }
 
     if (!s_flow || !s_sdes || !s_sdat) {
@@ -121,6 +137,18 @@ int main(int argc, char **argv) {
     uint32_t flow_data_off    = s_flow->offset;
     uint32_t flow_data_size   = s_flow->size;
     uint32_t total_ticks      = head.total_ticks;
+    uint32_t stored_required_channels = 0;
+    bool have_required_channels = false;
+
+    if (s_meta && s_meta->size >= sizeof(afx_meta_t)) {
+        afx_meta_t meta;
+        fseek(f, s_meta->offset, SEEK_SET);
+        if (fread(&meta, sizeof(meta), 1, f) == 1 &&
+            meta.version == AFX_META_VERSION) {
+            stored_required_channels = meta.required_channels;
+            have_required_channels = true;
+        }
+    }
 
     uint32_t flow_cmd_count = s_flow->count;
     double sample_pct = (double)sample_data_size / total_size * 100.0;
@@ -142,11 +170,17 @@ int main(int argc, char **argv) {
     printf("Samples:    %u bytes (%.1f%%) (at offset 0x%X)\n", sample_data_size, sample_pct, sample_data_off);
     printf("Flow Data:  %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_pct, flow_data_off);
     printf("Flow Cmds:  %u entries\n", flow_cmd_count);
+    if (have_required_channels) {
+        printf("Required Channels: %u\n", stored_required_channels);
+    }
     printf("--------------------------------------\n");
 
     // Scan flow commands to gather register usage stats and correlate sample address usage with sample descriptors
     uint32_t slot_addr[64] = {0};
     bool slot_has_addr[64] = {0};
+    bool active_slots[64] = {0};
+    uint32_t active_slot_count = 0;
+    uint32_t derived_required_channels = 0;
     uint32_t *addr_counts = NULL;
     int32_t *sample_formats = NULL;
         afx_sample_desc_t *descs = NULL;
@@ -179,28 +213,48 @@ int main(int argc, char **argv) {
                 uint8_t slot = bits & 0x3F;
                 uint8_t offset = (bits >> 6) & 0x1F;
                 uint8_t length = (bits >> 11) & 0x1F;
-                
-                for (int l = 0; l < length; l++) {
-                    uint16_t val;
-                    if (fread(&val, 2, 1, f) != 1) break;
-                    bytes_read += 2;
-                    uint8_t reg = offset + l;
 
-                    /* Register tracking logic... */
+                uint16_t values[32] = {0};
+                uint8_t values_read = 0;
+                for (; values_read < length; values_read++) {
+                    if (fread(&values[values_read], 2, 1, f) != 1) break;
+                    bytes_read += 2;
+                }
+
+                aica_chnl_packed_t payload;
+                bool has_payload = decode_slot_payload(offset, values_read, values, &payload);
+
+                for (uint8_t l = 0; l < values_read; l++) {
+                    uint16_t val = values[l];
+                    uint8_t reg = (uint8_t)(offset + l);
+
                     bool found = false;
                     if (reg == AICA_REG_SA_HI) {
-                        uint32_t control_bits = val & ((1u << 15) | (1u << 14));
+                        uint16_t ctl = has_payload ? payload.play_ctrl.raw : val;
+                        uint32_t control_bits = ctl & ((1u << 15) | (1u << 14));
                         if (control_bits & (1u << 15)) {
+                            if (!active_slots[slot]) {
+                                active_slots[slot] = true;
+                                active_slot_count++;
+                                if (active_slot_count > derived_required_channels) {
+                                    derived_required_channels = active_slot_count;
+                                }
+                            }
                             stats[0].count++; /* KYON */
                         }
                         if (control_bits & (1u << 14)) {
+                            if (active_slots[slot]) {
+                                active_slots[slot] = false;
+                                if (active_slot_count > 0) active_slot_count--;
+                            }
                             stats[1].count++; /* KYOFF */
                         }
                         stats[2].count++; /* Count the register write itself */
                         found = true;
                     } else {
                         if (reg == AICA_REG_SA_LO) {
-                            slot_addr[slot] = val;
+                            uint16_t sa_lo = has_payload ? payload.sa_low : val;
+                            slot_addr[slot] = sa_lo;
                             slot_has_addr[slot] = true;
                         }
                         for (int j = 3; stats[j].reg != 0xFF; j++) {
@@ -211,6 +265,8 @@ int main(int argc, char **argv) {
                         stats[13].count++; /* Index 13 is "OTHER" */
                     }
                 }
+
+                if (values_read < length) break;
                 
                 if (length & 1) {
                     uint16_t pad;
@@ -219,6 +275,11 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+        }
+
+        if (!have_required_channels) {
+            printf("Required Channels: %u (derived)\n", derived_required_channels);
+            printf("--------------------------------------\n");
         }
 
         printf("Flow Command Register Distribution:\n");

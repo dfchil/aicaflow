@@ -28,14 +28,14 @@ Current layout constants (from `include/afx/common.h` and `driver.h`):
 - `AFX_MEM_CLOCKS = 0x001FFFE0`
 - `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (`sizeof(afx_ipc_status_t)=32`, aligned)
 - `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (`AFX_IPC_QUEUE_SZ=0x0400`)
-- `AFX_PLAYER_STATE_ADDR = 0x001FF980` (`sizeof(afx_player_state_t)=552`, aligned down to 32-byte boundary)
+- `AFX_DRIVER_STATE_ADDR = 0x001FF980` (`sizeof(afx_driver_state_t)=268`, aligned down to 32-byte boundary)
 
 Addresses are derived by macros, not hardcoded constants:
 - `AFX_IPC_STATUS_ADDR = ((AFX_MEM_CLOCKS - sizeof(afx_ipc_status_t)) & ~31)`
 - `AFX_IPC_CMD_QUEUE_ADDR = (AFX_IPC_STATUS_ADDR - AFX_IPC_QUEUE_SZ)`
-- `AFX_PLAYER_STATE_ADDR = ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_player_state_t)) & ~31)`
+- `AFX_DRIVER_STATE_ADDR = ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_driver_state_t)) & ~31)`
 
-The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_player_state_t` at a fixed high-memory address. This struct now includes a small reserved stack for the ARM7 compiler to use for local variables and spills, protected by a 32-bit canary.
+The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_driver_state_t` at a fixed high-memory address. This struct includes a small reserved stack for the ARM7 compiler to use for local variables and spills, protected by a 32-bit canary.
 
 ```mermaid
 graph TD
@@ -48,7 +48,7 @@ graph TD
             direction TB
             STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t, 32 bytes)"]
             QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
-            PLAYER["<b>Player State & Stack</b><br/>0x001FF980 - 0x001FFBAF<br/>(afx_player_state_t, 552 bytes)"]
+            PLAYER["<b>Driver State & Stack</b><br/>0x001FF980 - 0x001FFA8B<br/>(afx_driver_state_t, 268 bytes)"]
             STATUS --- QUEUE
             QUEUE --- PLAYER
         end
@@ -69,6 +69,7 @@ graph TD
 [afx_section_entry_t[]]    - implicit directory table (immediately follows header)
 [FLOW]                     - array of afx_cmd_t
 [SDES]                     - array of afx_sample_desc_t
+[META]                     - optional afx_meta_t metadata block
 [SDAT]                     - raw ADPCM/PCM bytes
 ```
 
@@ -130,6 +131,20 @@ typedef struct {
 } afx_sample_desc_t;
 ```
 
+### Metadata (`afx_meta_t`)
+
+```c
+typedef struct {
+    uint32_t version;
+    uint32_t required_channels;
+    uint32_t reserved[2];
+} afx_meta_t;
+```
+
+Current use:
+- `required_channels`: peak AICA channels needed for song playback. The driver reserves this many channels for the flow and maps flow-local slot offsets onto that reserved set.
+- This allows runtime systems to reserve only the channels required by music, leaving the remainder available for sound effects or other flows.
+
 ### Flow Command Entry (`afx_cmd_t`)
 
 AFX v2 uses a variable-length command structure to support "burst" writes to consecutive AICA registers.
@@ -138,7 +153,7 @@ AFX v2 uses a variable-length command structure to support "burst" writes to con
 typedef struct {
     uint32_t timestamp;     /* Absolute time in ms */
     struct {
-      uint16_t slot : 6;    /* AICA voice slot (0-63) */
+    uint16_t slot : 6;    /* Flow-local channel offset (0-63) */
       uint16_t offset : 5;  /* Register offset (0-31) */
       uint16_t length : 5;  /* Number of consecutive 16-bit values (1-31) */
     };
@@ -153,7 +168,7 @@ typedef struct {
 
 **Example: Note-On Burst (18 bytes total)**
 - `timestamp`: Current time
-- `slot`: target voice
+- `slot`: flow-local channel offset resolved by the driver into one of the flow's reserved hardware channels
 - `offset`: 0 (`AICA_REG_SA_HI`)
 - `length`: 6
 - `values`: [SA_HI, SA_LO, LSA, LEA, D2R_D1R, EGH_RR]
@@ -161,7 +176,7 @@ typedef struct {
 
 **Example: Single Value Update (12 bytes total)**
 - `timestamp`: Current time
-- `slot`: target voice
+- `slot`: flow-local channel offset
 - `offset`: 13 (`AICA_REG_TOT_LVL`)
 - `length`: 1
 - `values`: [new_tl_volume]
@@ -216,7 +231,7 @@ absolute_spu_addr = afx_base + relative_offset;
 
 ### Runtime Fast Path Notes
 
-- `afx_player_state_t` includes runtime scratch fields used by the ARM7 loop to minimize transient locals in hot paths.
+- `afx_driver_state_t` includes runtime scratch fields used by the ARM7 loop to minimize transient locals in hot paths.
 - Queue tail wrap is fixed-size (`AFX_IPC_QUEUE_CAPACITY`), enabling constant-time ring behavior.
 - `TOT_LVL` volume scaling is lookup-table based at runtime:
     - a 256-entry TL scale table is rebuilt only when volume changes
@@ -237,7 +252,7 @@ IPC transport is now a ring queue in AICA RAM.
 Control/status block layout:
 - `afx_ipc_status_t` (head/tail/status/tick/volume)
 - command queue (`afx_ipc_cmd_t[]`)
-- `afx_player_state_t`
+- `afx_driver_state_t`
 
 Queue characteristics:
 - fixed-size circular buffer

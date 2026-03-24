@@ -426,23 +426,28 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
     memcpy(buffer + *buffer_size + 4, &bits, 2);
     *buffer_size += 6;
 
-    uint16_t values[6];
-    values[0] = ctl_val;                                    /* SA_HI */
-    values[1] = (uint16_t)(p.addr & 0xFFFF);                /* SA_LO */
-    
+    /* Build first 6 payload words directly in the output stream. */
+    uint16_t *payload_words = (uint16_t *)(void *)(buffer + *buffer_size);
+    for (int i = 0; i < 6; i++) payload_words[i] = 0;
+    aica_chnl_packed_t *payload = (aica_chnl_packed_t *)(void *)payload_words;
+    payload->play_ctrl.raw = ctl_val;                        /* SA_HI/CTL */
+    payload->sa_low = (uint16_t)(p.addr & 0xFFFF);           /* SA_LO */
+
     afx_sample_desc_t *desc = &sample_descs[program];
     uint32_t lsa = 0, lea = 0;
     if (desc->loop_mode != AFX_LOOP_NONE && desc->loop_end > 0) {
         lsa = desc->loop_start > 0xFFFF ? 0xFFFF : desc->loop_start;
         lea = desc->loop_end > 0xFFFE ? 0xFFFE : desc->loop_end;
     }
-    values[2] = (uint16_t)lsa;                              /* LSA */
-    values[3] = (uint16_t)lea;                              /* LEA */
-    
-    values[4] = (uint16_t)(((uint32_t)(d1r & 0x1F) << 8) | (ar & 0x1F)); /* D2R_D1R */
-    values[5] = (uint16_t)(((uint32_t)(d2r & 0x1F) << 8) | ((uint32_t)(dl & 0x1F) << 3) | (rr & 0x1F)); /* EGH_RR */
+    payload->lsa = (uint16_t)lsa;                            /* LSA */
+    payload->lea = (uint16_t)lea;                            /* LEA */
 
-    memcpy(buffer + *buffer_size, values, 12);
+    /* Preserve existing on-wire encoding for these two words. */
+    payload->env_ad.raw = (uint16_t)(((uint32_t)(d1r & 0x1F) << 8) | (ar & 0x1F));
+    payload->env_dr.raw = (uint16_t)(((uint32_t)(d2r & 0x1F) << 8) |
+                                     ((uint32_t)(dl & 0x1F) << 3) |
+                                     (rr & 0x1F));
+
     *buffer_size += 12;
     /* length=6 is even, no padding needed for align4 */
 }
@@ -477,6 +482,70 @@ int cmp_flow_cmds(const void *a, const void *b) {
     if (oa->seq < ob->seq) return -1;
     if (oa->seq > ob->seq) return 1;
     return 0;
+}
+
+static uint32_t afx_cmd_padded_size(const afx_cmd_t *cmd) {
+    uint32_t size = 6u + ((uint32_t)cmd->length << 1);
+    return AFX_ALIGN4(size);
+}
+
+static bool afx_cmd_get_sa_hi_word(const afx_cmd_t *cmd, uint16_t *out_val) {
+    if (!cmd || !out_val) return false;
+    if (cmd->offset > AICA_REG_SA_HI) return false;
+    if ((uint32_t)cmd->offset + (uint32_t)cmd->length <= AICA_REG_SA_HI) return false;
+
+    *out_val = cmd->values[AICA_REG_SA_HI - cmd->offset];
+    return true;
+}
+
+static uint8_t alloc_lowest_free_slot(const bool used[64]) {
+    for (uint8_t slot = 0; slot < 64; slot++) {
+        if (!used[slot]) return slot;
+    }
+    return 0xFF;
+}
+
+static uint32_t remap_flow_slots_minimize(uint8_t *stream, uint32_t size) {
+    uint8_t old_to_new[64];
+    bool new_slot_used[64] = {0};
+    uint32_t active_count = 0;
+    uint32_t peak_active = 0;
+    memset(old_to_new, 0xFF, sizeof(old_to_new));
+
+    uint32_t ptr = 0;
+    while (ptr < size) {
+        afx_cmd_t *cmd = (afx_cmd_t *)(void *)(stream + ptr);
+        uint8_t old_slot = cmd->slot;
+        uint8_t new_slot = old_to_new[old_slot];
+        uint16_t sa_hi_word = 0;
+        bool has_sa_hi = afx_cmd_get_sa_hi_word(cmd, &sa_hi_word);
+        bool is_key_on = has_sa_hi && ((sa_hi_word & (1u << 15)) != 0);
+        bool is_key_off = has_sa_hi && ((sa_hi_word & (1u << 14)) != 0);
+
+        if (is_key_on && new_slot == 0xFF) {
+            new_slot = alloc_lowest_free_slot(new_slot_used);
+            if (new_slot != 0xFF) {
+                old_to_new[old_slot] = new_slot;
+                new_slot_used[new_slot] = true;
+                active_count++;
+                if (active_count > peak_active) peak_active = active_count;
+            }
+        }
+
+        if (new_slot != 0xFF) {
+            cmd->slot = new_slot;
+        }
+
+        if (is_key_off && new_slot != 0xFF) {
+            new_slot_used[new_slot] = false;
+            old_to_new[old_slot] = 0xFF;
+            if (active_count > 0) active_count--;
+        }
+
+        ptr += afx_cmd_padded_size(cmd);
+    }
+
+    return peak_active;
 }
 
 static void print_usage(const char *progname) {
@@ -813,9 +882,16 @@ int main(int argc, char **argv) {
     free(sort_buffer);
     free(flow_stream_buffer);
 
-    afx_section_entry_t sections[3];
+    uint32_t required_channels = remap_flow_slots_minimize(sorted_flow, flow_stream_size);
+    afx_meta_t meta = {
+        .version = AFX_META_VERSION,
+        .required_channels = required_channels,
+        .reserved = {0, 0},
+    };
+
+    afx_section_entry_t sections[4];
     uint32_t section_count = 0;
-    uint32_t cursor = sizeof(afx_header_t) + (uint32_t)(3 * sizeof(afx_section_entry_t));
+    uint32_t cursor = sizeof(afx_header_t) + (uint32_t)(4 * sizeof(afx_section_entry_t));
     cursor = AFX_ALIGN32(cursor);
 
     sections[section_count++] = (afx_section_entry_t){
@@ -838,6 +914,16 @@ int main(int argc, char **argv) {
         .flags = 0,
     };
     cursor = AFX_ALIGN32(cursor + sdes_bytes);
+
+    sections[section_count++] = (afx_section_entry_t){
+        .id = AFX_SECT_META,
+        .offset = cursor,
+        .size = (uint32_t)sizeof(meta),
+        .count = 1,
+        .align = 32,
+        .flags = 0,
+    };
+    cursor = AFX_ALIGN32(cursor + (uint32_t)sizeof(meta));
 
     sections[section_count++] = (afx_section_entry_t){
         .id = AFX_SECT_SDAT,
@@ -880,6 +966,13 @@ int main(int argc, char **argv) {
         pos++;
     }
 
+    fwrite(&meta, sizeof(meta), 1, f_out);
+    pos = ftell(f_out);
+    while ((uint32_t)pos < sections[3].offset) {
+        fputc(0, f_out);
+        pos++;
+    }
+
     fseek(f_samples, 0, SEEK_SET);
     uint8_t copy_buf[4096];
     size_t n = 0;
@@ -892,6 +985,7 @@ int main(int argc, char **argv) {
     fclose(f_samples);
     fclose(f_mid);
     fclose(f_out);
-    printf("Success: Generated %s with %u flow ops (%u bytes). Duration: %ums\n", output_afx, flow_op_count, flow_stream_size, max_timestamp);
+    printf("Success: Generated %s with %u flow ops (%u bytes). Duration: %ums. Required channels: %u\n",
+           output_afx, flow_op_count, flow_stream_size, max_timestamp, required_channels);
     return 0;
 }

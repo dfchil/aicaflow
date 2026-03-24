@@ -3,274 +3,313 @@
 #include <afx/driver.h>
 #include <afx/host.h>
 
-/**
- * AICA Flow ARM7 Core Driver (Standard C99/C11)
- * Optimized for Zero-Stack / Absolute Memory Mapping
- * Compatible with ARM GCC v8.x
+/*
+ * AICA Flow ARM7 Core Driver (Lean Linked-List Flow Management)
+ * Supports multiple concurrent .afx streams.
  */
 
-#define AICA_CLOCK_ADDR 0x001FFFE0 
+#define AICA_CLOCK_ADDR 0x001FFFE0
 
 #define AICA_HW_CLOCK      ((volatile uint32_t *)AICA_CLOCK_ADDR)
 #define AICA_PREV_HW_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 4))
 #define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 8))
 
-/* AICA DSP register regoins (ARM7 address space) */
-#define AICA_DSP_COEF ((volatile uint32_t *)0x00801000)
-#define AICA_DSP_MPRO ((volatile uint32_t *)0x00803000)
+#define AICA_SGLT_LO  ((volatile uint32_t *)AICA_SGLT_LO_ADDR)
+#define AICA_SGLT_HI  ((volatile uint32_t *)AICA_SGLT_HI_ADDR)
 
-#define ipc_state_ptr ((volatile afx_ipc_status_t *)AFX_IPC_STATUS_ADDR)
-#define plr_state_ptr ((volatile afx_player_state_t *)AFX_PLAYER_STATE_ADDR)
+#define ipc_ctrl_ptr  ((volatile afx_ipc_control_t *)AFX_IPC_CONTROL_ADDR)
+#define drv_state_ptr ((volatile afx_driver_state_t *)AFX_DRIVER_STATE_ADDR)
 #define ipc_queue_ptr ((volatile afx_ipc_cmd_t *)AFX_IPC_CMD_QUEUE_ADDR)
 
-static inline void rebuild_tl_scale_lut(uint32_t volume) {
-    uint32_t vol = volume & 0xFFu;
-    for (uint32_t tl = 0; tl < 256u; tl++) {
-        uint32_t x = (255u - tl) * vol;
-        uint32_t scaled = (x + 1u + (x >> 8)) >> 8; /* floor(x/255) for x<=65025 */
-        plr_state_ptr->tl_scale_lut[tl] = (uint8_t)(255u - scaled);
-    }
-    plr_state_ptr->tl_lut_volume = vol;
+static inline uint32_t ptr_to_u32(const volatile afx_flow_state_t *p) {
+    return (uint32_t)(uintptr_t)p;
 }
 
-/**
- * Initialize Driver State at absolute addresses
+static inline volatile afx_flow_state_t *u32_to_ptr(uint32_t addr) {
+    return (volatile afx_flow_state_t *)(uintptr_t)addr;
+}
+
+static inline void list_add_tail(volatile afx_flow_state_t *node) {
+    if (!node) return;
+
+    node->prev_ptr = drv_state_ptr->active_flows_tail;
+    node->next_ptr = 0;
+
+    if (drv_state_ptr->active_flows_tail) {
+        volatile afx_flow_state_t *tail = u32_to_ptr(drv_state_ptr->active_flows_tail);
+        tail->next_ptr = ptr_to_u32(node);
+    } else {
+        drv_state_ptr->active_flows_head = ptr_to_u32(node);
+    }
+
+    drv_state_ptr->active_flows_tail = ptr_to_u32(node);
+}
+
+static inline void list_remove(volatile afx_flow_state_t *node) {
+    if (!node) return;
+
+    uint32_t prev = node->prev_ptr;
+    uint32_t next = node->next_ptr;
+
+    if (prev) {
+        volatile afx_flow_state_t *p = u32_to_ptr(prev);
+        p->next_ptr = next;
+    } else {
+        drv_state_ptr->active_flows_head = next;
+    }
+
+    if (next) {
+        volatile afx_flow_state_t *n = u32_to_ptr(next);
+        n->prev_ptr = prev;
+    } else {
+        drv_state_ptr->active_flows_tail = prev;
+    }
+
+    node->prev_ptr = 0;
+    node->next_ptr = 0;
+}
+
+static inline uint16_t apply_flow_tl_lut(volatile afx_flow_state_t *flow, uint16_t reg_value) {
+    uint32_t lut_ptr = flow->tl_scale_lut_ptr;
+    uint8_t tl = (uint8_t)(reg_value & 0xFFu);
+    uint8_t scaled_tl = *(volatile uint8_t *)(uintptr_t)(lut_ptr + tl);
+    return (uint16_t)((reg_value & 0xFF00u) | scaled_tl);
+}
+
+static inline uint32_t resolve_flow_slot(const volatile afx_flow_state_t *flow,
+                                         uint32_t slot) {
+    if (slot >= 64u) return 0u;
+    if (flow->channel_map[slot] == 0xFFu) return 0u;
+    return flow->channel_map[slot];
+}
+
+static inline uint32_t flow_uses_absolute_sample_addrs(const volatile afx_flow_state_t *flow) {
+    return (flow->flags & AFX_FLOW_FLAG_SAMPLE_ADDRS_ABSOLUTE) != 0u;
+}
+
+/*
+ * In relative mode, FLOW writes encode SA_HI/SA_LO as offsets from afx_base.
+ * If both words are present in this command, patch them to absolute AICA RAM.
  */
+static inline uint32_t patch_relative_sample_addr_words(const volatile afx_flow_state_t *flow,
+                                                        const afx_cmd_t *cmd,
+                                                        uint16_t *patched_sa_hi,
+                                                        uint16_t *patched_sa_lo) {
+    uint32_t sa_hi_idx = 0xFFFFFFFFu;
+    uint32_t sa_lo_idx = 0xFFFFFFFFu;
+    uint32_t start = cmd->offset;
+    uint32_t end = start + cmd->length;
+
+    if (start <= AICA_REG_SA_HI && AICA_REG_SA_HI < end) {
+        sa_hi_idx = AICA_REG_SA_HI - start;
+    }
+    if (start <= AICA_REG_SA_LO && AICA_REG_SA_LO < end) {
+        sa_lo_idx = AICA_REG_SA_LO - start;
+    }
+
+    if (sa_hi_idx == 0xFFFFFFFFu || sa_lo_idx == 0xFFFFFFFFu) return 0u;
+
+    uint16_t sa_hi_word = cmd->values[sa_hi_idx];
+    uint16_t sa_lo_word = cmd->values[sa_lo_idx];
+
+    uint32_t relative_addr = (((uint32_t)sa_hi_word & 0x7Fu) << 16) | (uint32_t)sa_lo_word;
+    uint32_t absolute_addr = flow->afx_base + relative_addr;
+
+    *patched_sa_hi = (uint16_t)((sa_hi_word & 0xFF80u) | ((absolute_addr >> 16) & 0x7Fu));
+    *patched_sa_lo = (uint16_t)(absolute_addr & 0xFFFFu);
+    return 1u;
+}
+
+static inline void execute_cmd(volatile afx_flow_state_t *flow, const afx_cmd_t *cmd) {
+    uint32_t hw_slot = resolve_flow_slot(flow, (uint32_t)cmd->slot);
+    uint32_t base_ptr = AICA_REG_BASE + (hw_slot << 7);
+    uint32_t reg_idx = cmd->offset;
+
+    uint16_t patched_sa_hi = 0;
+    uint16_t patched_sa_lo = 0;
+    uint32_t have_patched_sa = 0u;
+    if (!flow_uses_absolute_sample_addrs(flow)) {
+        have_patched_sa =
+            patch_relative_sample_addr_words(flow, cmd, &patched_sa_hi, &patched_sa_lo);
+    }
+
+    for (uint32_t i = 0; i < cmd->length; i++) {
+        uint32_t current_reg = reg_idx + i;
+        uint32_t reg_addr = base_ptr + (current_reg << 2);
+        uint16_t reg_value = cmd->values[i];
+
+        if (have_patched_sa) {
+            if (current_reg == AICA_REG_SA_HI) {
+                reg_value = patched_sa_hi;
+            } else if (current_reg == AICA_REG_SA_LO) {
+                reg_value = patched_sa_lo;
+            }
+        }
+
+        if (current_reg == AICA_REG_TOT_LVL && flow->tl_scale_lut_ptr) {
+            reg_value = apply_flow_tl_lut(flow, reg_value);
+        }
+        *(volatile uint16_t *)reg_addr = reg_value;
+    }
+}
+
+static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow, uint32_t tick) {
+    uint32_t offset = flow->flow_idx;
+
+    while (offset < flow->flow_size) {
+        const afx_cmd_t *cmd = (const afx_cmd_t *)(uintptr_t)(flow->flow_ptr + offset);
+        if (cmd->timestamp > tick) {
+            flow->next_event_tick = cmd->timestamp;
+            break;
+        }
+
+        execute_cmd(flow, cmd);
+
+        uint32_t cmd_size = 6u + ((uint32_t)cmd->length << 1);
+        cmd_size = (cmd_size + 3u) & ~3u;
+        offset += cmd_size;
+    }
+
+    flow->flow_idx = offset;
+    return offset;
+}
+
+/* Returns non-zero if every slot in the mask has its SGLT completion bit set. */
+static inline uint32_t channels_all_silent(uint64_t mask) {
+    if (mask == 0) return 1u;
+    uint64_t sglt = ((uint64_t)*AICA_SGLT_HI << 32) | *AICA_SGLT_LO;
+    return ((sglt & mask) == mask) ? 1u : 0u;
+}
+
+static inline void signal_flow_completed(uint32_t flow_addr) {
+    ipc_ctrl_ptr->completed_flow_addr = flow_addr;
+    ipc_ctrl_ptr->completed_flow_seq = ipc_ctrl_ptr->completed_flow_seq + 1u;
+}
+
 void driver_init(void) {
-    ipc_state_ptr->magic = AICAF_MAGIC;
-    ipc_state_ptr->arm_status = 0; // Idle
-    ipc_state_ptr->current_tick = 0;
-    ipc_state_ptr->flow_pos = 0;
-    ipc_state_ptr->volume = 255;
-    ipc_state_ptr->q_head = 0;
-    ipc_state_ptr->q_tail = 0;
-    
-    plr_state_ptr->afx_base = 0;
-    plr_state_ptr->flow_ptr = 0;
-    plr_state_ptr->flow_count = 0;
-    plr_state_ptr->flow_idx = 0;
-    plr_state_ptr->next_event_tick = 0;
-    plr_state_ptr->is_playing = 0;
-    plr_state_ptr->loop_count = 0;
-    plr_state_ptr->stack_canary = 0xDEADBEEFu;
-    plr_state_ptr->tl_lut_volume = 0xFFFFFFFFu;
+    ipc_ctrl_ptr->magic = AICAF_MAGIC;
+    ipc_ctrl_ptr->arm_status = 0;
+    ipc_ctrl_ptr->current_tick = 0;
+    ipc_ctrl_ptr->volume = 255;
+    ipc_ctrl_ptr->q_head = 0;
+    ipc_ctrl_ptr->q_tail = 0;
+    ipc_ctrl_ptr->completed_flow_addr = 0;
+    ipc_ctrl_ptr->completed_flow_seq = 0;
 
-    rebuild_tl_scale_lut(ipc_state_ptr->volume);
+    drv_state_ptr->active_flows_head = 0;
+    drv_state_ptr->active_flows_tail = 0;
 
+    drv_state_ptr->stack_canary = 0xDEADBEEFu;
     *AICA_PREV_HW_CLOCK = *AICA_HW_CLOCK;
     *AICA_VIRTUAL_CLOCK = 0;
-
-    /* Initialize Stack Pointer to the top of our reserved mini_stack.
-       Stack grows downwards, so we point to &mini_stack[64]. */
-    __asm__ volatile (
-        "add r0, %0, #256\n\t"
-        "mov sp, r0\n\t"
-        : 
-        : "r" (plr_state_ptr->mini_stack)
-        : "r0", "sp"
-    );
 }
 
-/**
- * Finds a specific section defined by its 4CC ID in an .afx file header.
- * The section table immediately follows the afx_header_t.
- */
-static inline const afx_section_entry_t *afx_find_section(const afx_header_t *hdr,
-                                                          uint32_t section_id) {
-    const afx_section_entry_t *tab = (const afx_section_entry_t *)(hdr + 1);
-    for (uint32_t i = 0; i < hdr->section_count; i++) {
-        if (tab[i].id == section_id) return &tab[i];
-    }
-    return NULL;
-}
-
-static inline void process_ipc_command(uint32_t cmd, uint32_t arg0) {
+static inline void process_ipc_command(uint32_t cmd, uint32_t arg0, uint32_t arg1) {
     switch (cmd) {
-        case AICAF_CMD_PLAY:
-        {
-            const afx_header_t *hdr = (const afx_header_t *)(uintptr_t)arg0;
-            if (hdr->magic != AICAF_MAGIC || hdr->version != AICAF_VERSION) {
-                ipc_state_ptr->arm_status = 3; // Error
-                break;
-            }
+        case AICAF_CMD_PLAY_FLOW: {
+            volatile afx_flow_state_t *flow = u32_to_ptr(arg0);
+            if (!flow) break;
 
-            const afx_section_entry_t *flow_sect = afx_find_section(hdr, AFX_SECT_FLOW);
-            const afx_section_entry_t *sdat_sect = afx_find_section(hdr, AFX_SECT_SDAT);
-            const afx_section_entry_t *dspc_sect = afx_find_section(hdr, AFX_SECT_DSPC);
-            const afx_section_entry_t *dspm_sect = afx_find_section(hdr, AFX_SECT_DSPM);
-            if (!flow_sect || !sdat_sect) {
-                ipc_state_ptr->arm_status = 3; // Error
-                break;
-            }
+            if (flow->required_channels == 0 || flow->required_channels > 64u) break;
+            if (flow->assigned_channels == 0) break;
+            if (flow->flow_ptr == 0 || flow->flow_size == 0 || flow->flow_count == 0) break;
 
-            plr_state_ptr->afx_base     = arg0;
-            plr_state_ptr->flow_ptr     = afx_resolve_file_offset(plr_state_ptr->afx_base, flow_sect->offset);
-            plr_state_ptr->flow_count   = flow_sect->count;
-            plr_state_ptr->flow_size    = flow_sect->size;
+            flow->flow_idx = 0;
+            flow->next_event_tick = 0;
 
-            if (dspc_sect && dspc_sect->size > 0) {
-                const uint32_t *src = (const uint32_t *)(uintptr_t)afx_resolve_file_offset(plr_state_ptr->afx_base, dspc_sect->offset);
-                uint32_t words = dspc_sect->size >> 2;
-                for (uint32_t w = 0; w < words; w++) AICA_DSP_COEF[w] = src[w];
-            }
-            if (dspm_sect && dspm_sect->size > 0) {
-                const uint32_t *src = (const uint32_t *)(uintptr_t)afx_resolve_file_offset(plr_state_ptr->afx_base, dspm_sect->offset);
-                uint32_t words = dspm_sect->size >> 2;
-                for (uint32_t w = 0; w < words; w++) AICA_DSP_MPRO[w] = src[w];
-            }
-
-            plr_state_ptr->flow_idx = 0;
-            plr_state_ptr->next_event_tick = 0;
-            plr_state_ptr->is_playing = 1;
-            *AICA_VIRTUAL_CLOCK = 0;
-
-            ipc_state_ptr->flow_pos = 0;
-            ipc_state_ptr->current_tick = 0;
-            ipc_state_ptr->arm_status = 1;
+            flow->is_playing = AFX_FLOW_PLAYING;
+            list_add_tail(flow);
             break;
         }
-        case AICAF_CMD_STOP:
-            plr_state_ptr->is_playing = 0;
-            ipc_state_ptr->arm_status = 0;
+
+        case AICAF_CMD_STOP_FLOW:
+        case AICAF_CMD_RETIRE_FLOW: {
+            volatile afx_flow_state_t *flow = u32_to_ptr(arg0);
+            if (!flow) break;
+            flow->is_playing = AFX_FLOW_STOPPED;
+            list_remove(flow);
             break;
-        case AICAF_CMD_PAUSE:
-            plr_state_ptr->is_playing = 0;
-            ipc_state_ptr->arm_status = 2;
+        }
+
+        case AICAF_CMD_PAUSE_FLOW: {
+            volatile afx_flow_state_t *flow = u32_to_ptr(arg0);
+            if (flow) flow->is_playing = AFX_FLOW_PAUSED;
             break;
+        }
+
+        case AICAF_CMD_RESUME_FLOW: {
+            volatile afx_flow_state_t *flow = u32_to_ptr(arg0);
+            if (flow) flow->is_playing = AFX_FLOW_PLAYING;
+            break;
+        }
+
+        case AICAF_CMD_SEEK_FLOW: {
+            volatile afx_flow_state_t *flow = u32_to_ptr(arg0);
+            if (!flow || flow->flow_ptr == 0) break;
+            flow->flow_idx = arg1;
+            flow->next_event_tick = 0;
+            break;
+        }
+
         case AICAF_CMD_VOLUME:
-            ipc_state_ptr->volume = arg0 & 0xFF;
-            if (plr_state_ptr->tl_lut_volume != ipc_state_ptr->volume) {
-                rebuild_tl_scale_lut(ipc_state_ptr->volume);
-            }
+            ipc_ctrl_ptr->volume = arg0 & 0xFFu;
             break;
-        case AICAF_CMD_SEEK:
-        {
-            uint32_t seek_target = arg0;
-            plr_state_ptr->flow_idx = afx_cmd_lower_bound_by_offset(
-                (const uint8_t *)(uintptr_t)plr_state_ptr->flow_ptr,
-                plr_state_ptr->flow_size,
-                plr_state_ptr->flow_count,
-                seek_target
-            );
-            /* Skip forward pointer to found offset */
-            plr_state_ptr->flow_ptr += plr_state_ptr->flow_idx;
-            *AICA_VIRTUAL_CLOCK = seek_target;
-            ipc_state_ptr->current_tick = seek_target;
-            break;
-        }
+
         default:
             break;
     }
 }
 
-/**
- * Execute Flow Command
- * Writing directly to G2 bus registers for specific slot/reg.
- * SA address fields are file-relative offsets resolved from afx_base.
- */
-static inline void execute_cmd(const afx_cmd_t *cmd) {
-    uint32_t base_ptr = AICA_REG_BASE + ((uint32_t)cmd->slot << 7);
-    uint32_t reg_idx = cmd->offset;
-    
-    for (uint32_t i = 0; i < cmd->length; i++) {
-        uint32_t current_reg = reg_idx + i;
-        uint32_t reg_addr = base_ptr + (current_reg << 2);
-        uint32_t val = (uint32_t)cmd->values[i];
-
-        /* Special handling for registers that need absolute address mapping or scaling */
-        switch (current_reg) {
-            case AICA_REG_SA_LO:
-            {
-                uint32_t resolved = afx_resolve_file_offset(plr_state_ptr->afx_base, val);
-                val = resolved & 0xFFFFu;
-                break;
-            }
-            case AICA_REG_SA_HI:
-            {
-                /* We assume the 'val' passed in here has the flags (KeyOn, etc) in high bits.
-                   We only replace the low bits [6:0] with the upper bits of absolute address. */
-                uint32_t resolved = afx_resolve_file_offset(plr_state_ptr->afx_base, val);
-                uint32_t addr_hi = (resolved >> 16) & 0x7Fu;
-                val = (val & ~0x7Fu) | addr_hi;
-                break;
-            }
-            case AICA_REG_TOT_LVL:
-                /* TL scale mapping (velocity curve) */
-                val = plr_state_ptr->tl_scale_lut[val & 0xFFu];
-                break;
-        }
-
-        *((volatile uint32_t *)(uintptr_t)reg_addr) = val;
-    }
-}
-
-/**
- * ARM7 Main Function
- * Entry point after crt0.s setup.
- */
 void arm_main(void) {
     driver_init();
 
     while (1) {
-        // Process incoming queued commands (SH4 producer -> ARM7 consumer)
-        while (ipc_state_ptr->q_tail != ipc_state_ptr->q_head) {
-            uint32_t q_idx = ipc_state_ptr->q_tail;
-            uint32_t q_cmd = ipc_queue_ptr[q_idx].cmd;
-            uint32_t q_arg0 = ipc_queue_ptr[q_idx].arg0;
-            
-            ipc_state_ptr->q_tail = (q_idx + 1u) & (AFX_IPC_QUEUE_CAPACITY - 1);
-            process_ipc_command(q_cmd, q_arg0);
-        }
-        
-        // Update virtual clock based on true hardware ticks
         uint32_t current_hw = *AICA_HW_CLOCK;
         uint32_t hw_delta = current_hw - *AICA_PREV_HW_CLOCK;
         if (hw_delta > 0) {
             *AICA_PREV_HW_CLOCK = current_hw;
-            if (plr_state_ptr->is_playing) {
-                *AICA_VIRTUAL_CLOCK += hw_delta;
-            }
+            *AICA_VIRTUAL_CLOCK += hw_delta;
         }
 
-        // Poll for Playback Trigger from SH4
-        if (plr_state_ptr->is_playing) {
-            // Did the SH4 host modify the virtual clock backwards? (Rewind)
-            if (*AICA_VIRTUAL_CLOCK < ipc_state_ptr->current_tick) {
-                plr_state_ptr->flow_idx = 0; // Reset and catch up
-            }
+        ipc_ctrl_ptr->current_tick = *AICA_VIRTUAL_CLOCK;
 
-            ipc_state_ptr->current_tick = *AICA_VIRTUAL_CLOCK;
-        // Check for stack overflow using our canary
-        if (plr_state_ptr->stack_canary != 0xDEADBEEFu) {
-            ipc_state_ptr->arm_status = 3; // Error
-            plr_state_ptr->is_playing = 0;
+        if (drv_state_ptr->stack_canary != 0xDEADBEEFu) {
+            ipc_ctrl_ptr->arm_status = 3;
+            break;
         }
-            // Simple Streaming Interpreter (While loop allows fast catching up if seeked forward)
-            while (plr_state_ptr->is_playing && plr_state_ptr->flow_idx < plr_state_ptr->flow_count) {
-                const afx_cmd_t *cmd = (const afx_cmd_t *)(uintptr_t)plr_state_ptr->flow_ptr;
-                
-                if (*AICA_VIRTUAL_CLOCK >= cmd->timestamp) {
-                    execute_cmd(cmd);
-                    
-                    /* Advance pointer by variable command size (4 ts + 2 context + length * 2) */
-                    uint32_t cmd_size = 6 + (cmd->length * 2);
-                    /* Ensure 4-byte padding if an odd number of values were written */
-                    if (cmd->length & 1) cmd_size += 2;
-                    
-                    plr_state_ptr->flow_ptr += cmd_size;
-                    plr_state_ptr->flow_idx++;
-                    ipc_state_ptr->flow_pos = plr_state_ptr->flow_idx;
-                } else {
-                    plr_state_ptr->next_event_tick = cmd->timestamp;
-                    break;
+
+        while (ipc_ctrl_ptr->q_tail != ipc_ctrl_ptr->q_head) {
+            volatile afx_ipc_cmd_t *c = &ipc_queue_ptr[ipc_ctrl_ptr->q_tail];
+            process_ipc_command(c->cmd, c->arg0, c->arg1);
+            ipc_ctrl_ptr->q_tail = (ipc_ctrl_ptr->q_tail + 1u) & (AFX_IPC_QUEUE_CAPACITY - 1u);
+        }
+
+        uint32_t active = 0;
+        volatile afx_flow_state_t *flow = u32_to_ptr(drv_state_ptr->active_flows_head);
+        while (flow) {
+            uint32_t next_addr = flow->next_ptr;
+
+            if (flow->is_playing == AFX_FLOW_PLAYING) {
+                active = 1;
+                flow_step_until_tick(flow, ipc_ctrl_ptr->current_tick);
+
+                if (flow->flow_idx >= flow->flow_size) {
+                    /* Commands exhausted — wait for HW channels to go silent. */
+                    flow->is_playing = AFX_FLOW_DRAINING;
+                }
+            } else if (flow->is_playing == AFX_FLOW_DRAINING) {
+                active = 1;
+                if (channels_all_silent(flow->assigned_channels)) {
+                    uint32_t completed_addr = ptr_to_u32(flow);
+                    flow->is_playing = AFX_FLOW_STOPPED;
+                    list_remove(flow);
+                    signal_flow_completed(completed_addr);
                 }
             }
 
-            if (plr_state_ptr->flow_idx >= plr_state_ptr->flow_count) {
-                // End of song logic
-                plr_state_ptr->is_playing = 0;
-                ipc_state_ptr->arm_status = 0; // Back to Idle
-            }
+            flow = u32_to_ptr(next_addr);
         }
+
+        ipc_ctrl_ptr->arm_status = active ? 1u : 0u;
     }
 }

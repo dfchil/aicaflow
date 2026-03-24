@@ -11,30 +11,33 @@ include $(KOS_BASE)/Makefile.rules
 # -ffreestanding: No standard library
 # -nostdlib: Don't link against standard libraries
 # -fno-stack-protector: Ensure no stack-related code is generated
-CFLAGS  = -marm -mcpu=arm7di -O2 -std=c99 -Wall -ffreestanding -fno-stack-protector -I../../include
+ARM_CFLAGS  = -marm -mcpu=arm7di -O2 -std=c99 -Wall -ffreestanding -fno-stack-protector -I../../include
 
-LDFLAGS = -nostdlib -Wl,-Ttext=0x00000000 -Wl,--build-id=none
+LDFLAGS = -nostdlib -Wl,-Ttext=0x00000000 -Wl,--build-id=none -Wl,-e,reset
 
 SRCS	= afx_driver.c
-OBJS	= afx_driver.o
+BUILD_DIR := build
+OBJS	= $(SRCS:%.c=$(BUILD_DIR)/%.o)
 CRT0_S  = crt0.s
-CRT0_O  = crt0.o
+CRT0_O  = $(BUILD_DIR)/crt0.o
 
 LIBDIR= ../../lib
-ELF	 = afx_driver.elf
+ELF	 = $(BUILD_DIR)/afx_driver.elf
 
-DRIVER=afx_driver.bin
-DRIVER_INCLUDE := ../../include/afx/afx_driver_blob.h
+DRIVER=$(BUILD_DIR)/afx_driver.bin
+DRIVER_INCLUDE := ../../include/afx/bin/driver_blob.h
 
-HOSTLIB=$(LIBDIR)/afx_host.a
+HOSTLIB=$(LIBDIR)/libafx.a
 
 all: $(HOSTLIB)
 
 $(CRT0_O): $(CRT0_S)
-	$(DC_ARM_CC) $(CFLAGS) -c $< -o $@
+	@mkdir -p $(BUILD_DIR)
+	$(DC_ARM_CC) $(ARM_CFLAGS) -c $< -o $@
 
-%.o: %.c
-	$(DC_ARM_CC) $(CFLAGS) -c $< -o $@
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(BUILD_DIR)
+	$(DC_ARM_CC) $(ARM_CFLAGS) -c $< -o $@
 
 $(ELF): $(CRT0_O) $(OBJS)
 	$(DC_ARM_CC) $(LDFLAGS) $(CRT0_O) $(OBJS) -o $@
@@ -44,6 +47,7 @@ $(DRIVER): $(ELF)
 
 
 $(DRIVER_INCLUDE): $(DRIVER)
+	@mkdir -p $(dir $@)
 	$(KOS_BASE)/utils/bin2c/bin2c $< $@ afx_driver
 
 $(HOSTLIB): afx_host_lib.c $(DRIVER_INCLUDE)
@@ -51,6 +55,7 @@ $(HOSTLIB): afx_host_lib.c $(DRIVER_INCLUDE)
 	$(KOS_CC) $(KOS_CFLAGS) -I../../include -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(CRT0_O) $(ELF) $(DRIVER) $(HOSTLIB) $(DRIVER_INCLUDE)
+	rm -f $(HOSTLIB) $(DRIVER_INCLUDE)
+	rm -rf $(BUILD_DIR)
 
 .PHONY: all clean
