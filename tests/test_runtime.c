@@ -7,11 +7,18 @@
 #include <afx/driver.h>
 #include <afx/host.h>
 
+
+static inline uint32_t afx_scale_total_level(uint32_t tl, uint32_t volume) {
+  uint32_t x = (255u - (tl & 0xFFu)) * (volume & 0xFFu);
+  uint32_t scaled = (x + 1u + (x >> 8)) >> 8;
+  return 255u - scaled;
+}
+
+
 static void test_struct_layout(void) {
     assert(sizeof(afx_header_t) == 20);
     assert(sizeof(afx_section_entry_t) == 24);
     assert(sizeof(afx_sample_desc_t) == 32);
-    assert(sizeof(afx_meta_t) == 16);
     /* Variable-length command header is 6 bytes + values array */
     assert(sizeof(afx_cmd_t) == 6u); 
 
@@ -28,12 +35,13 @@ static void test_struct_layout(void) {
 }
 
 static void test_driver_state_abi(void) {
-    /* Driver runtime state now includes list links + canary + mini stack. */
-    assert(sizeof(afx_driver_state_t) == 268u);
-    assert(offsetof(afx_driver_state_t, active_flows_head) == 0u);
-    assert(offsetof(afx_driver_state_t, active_flows_tail) == 4u);
-    assert(offsetof(afx_driver_state_t, stack_canary) == 8u);
-    assert(offsetof(afx_driver_state_t, mini_stack) == 12u);
+    /* Driver runtime state now uses array flow entries and counters. */
+    assert(sizeof(afx_driver_state_t) == 520u);
+    assert(offsetof(afx_driver_state_t, flow_count_active) == 0u);
+    assert(offsetof(afx_driver_state_t, flow_count_retired) == 1u);
+    assert(offsetof(afx_driver_state_t, flow_entries) == 4u);
+    assert(offsetof(afx_driver_state_t, stack_canary) == 260u);
+    assert(offsetof(afx_driver_state_t, mini_stack) == 264u);
 
     /* Flow state carries optional per-flow LUT pointer. */
     assert(offsetof(afx_flow_state_t, tl_scale_lut_ptr) == 40u);

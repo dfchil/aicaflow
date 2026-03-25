@@ -1,11 +1,11 @@
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stddef.h>
-#include <stdio.h>
 #include <afx/host.h>
 #include <enDjinn/enj_enDjinn.h>
 #include <enDjinn/ext/dca_file.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 int fDaValidateHeader(const fDcAudioHeader *dca);
 size_t fDaCalcChannelSizeBytes(const fDcAudioHeader *dca);
@@ -24,10 +24,10 @@ static int load_dca_blob(uint8_t *dca_data) {
   fDcAudioHeader *data = (fDcAudioHeader *)dca_data;
   if (fDaValidateHeader(data)) {
     return afx_sample_upload(fDaGetChannelSamples(data, 0),
-                                fDaCalcChannelSizeBytes(data),
-                                fDaCalcSampleRateHz(data),
-                                (uint8_t[]){16, 8, 4}[fDaGetSampleFormat(data)],
-                                fDaGetChannelCount(data));
+                             fDaCalcChannelSizeBytes(data),
+                             fDaCalcSampleRateHz(data),
+                             (uint8_t[]){16, 8, 4}[fDaGetSampleFormat(data)],
+                             fDaGetChannelCount(data));
   }
   return -1;
 }
@@ -68,37 +68,37 @@ typedef struct {
   int sounds[6];
 } SPE_state_t;
 
-/*
+/**
  * Build a single-shot .afx flow in memory for a pre-uploaded sample.
  * Uses AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS so the FLOW commands embed
  * absolute AICA SPU address. Returns flow SPU address, or 0 on failure.
+ *
+ * returns flow slot index (0-63) on success, or 0 on failure (since slot 0 is
+ * used, caller must check for flow upload success to disambiguate)
  */
 static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   afx_sample_info_t info;
   if (!afx_sample_get_info(sample_handle, &info)) {
-    printf("[SFX] sample info lookup failed: handle=%lu\n", (unsigned long)sample_handle);
+    printf("[SFX] sample info lookup failed: handle=%lu\n",
+           (unsigned long)sample_handle);
     return 0;
   }
 
   uint8_t pcms = (info.bitsize == 16) ? 0 : (info.bitsize == 8) ? 1 : 2;
-  uint32_t n = (info.bitsize == 16) ? info.length / 2
-             : (info.bitsize ==  8) ? info.length
-             :                        info.length * 2;
-  if (info.channels > 1) n /= info.channels;
+  uint32_t n = (info.bitsize == 16)  ? info.length / 2
+               : (info.bitsize == 8) ? info.length
+                                     : info.length * 2;
+  if (info.channels > 1)
+    n /= info.channels;
   uint32_t duration_ms = n ? (n * 1000u) / info.rate + 1u : 1000u;
 
-  uint8_t  dipan     = (uint8_t)((uint32_t)pan * 0x1Fu / 255u);
+  uint8_t dipan = (uint8_t)((uint32_t)pan * 0x1Fu / 255u);
 
-    printf("[SFX] sample=%lu spu=0x%08lx len=%lu rate=%lu bits=%u ch=%u pan=%u dipan=%u dur=%lums\n",
-      (unsigned long)sample_handle,
-      (unsigned long)info.spu_addr,
-      (unsigned long)info.length,
-      (unsigned long)info.rate,
-      info.bitsize,
-      info.channels,
-      pan,
-      dipan,
-      (unsigned long)duration_ms);
+  printf("[SFX] sample=%lu spu=0x%08lx len=%lu rate=%lu bits=%u ch=%u pan=%u "
+         "dipan=%u dur=%lums\n",
+         (unsigned long)sample_handle, (unsigned long)info.spu_addr,
+         (unsigned long)info.length, (unsigned long)info.rate, info.bitsize,
+         info.channels, pan, dipan, (unsigned long)duration_ms);
 
   const uint16_t reg_play_ctrl =
       (uint16_t)(offsetof(aica_chnl_packed_t, play_ctrl) / sizeof(uint16_t));
@@ -112,24 +112,25 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
 
   /* Header */
   afx_header_t *hdr = (afx_header_t *)(blob);
-  hdr->magic         = AICAF_MAGIC;
-  hdr->version       = AICAF_VERSION;
+  hdr->magic = AICAF_MAGIC;
+  hdr->version = AICAF_VERSION;
   hdr->section_count = 2u;
-  hdr->total_ticks   = duration_ms;
-  hdr->flags         = AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS;
+  hdr->total_ticks = duration_ms;
+  hdr->flags = AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS;
 
   /* Section table */
-  afx_section_entry_t *sects = (afx_section_entry_t *)(blob + sizeof(afx_header_t));
+  afx_section_entry_t *sects =
+      (afx_section_entry_t *)(blob + sizeof(afx_header_t));
 
   uint32_t flow_off = sizeof(afx_header_t) + 2 * sizeof(afx_section_entry_t);
   uint8_t *cursor = blob + flow_off;
-  
+
   afx_cmd_t *cmd0 = (afx_cmd_t *)cursor;
   cmd0->timestamp = 0;
   cmd0->slot = 0;
   cmd0->offset = reg_play_ctrl;
   cmd0->length = startup_reg_count;
-  
+
   aica_chnl_packed_t *chncfg = (aica_chnl_packed_t *)cmd0->values;
   chncfg->play_ctrl.bits.key_on_ex = 1u;
   chncfg->play_ctrl.bits.key_on = 1u;
@@ -152,26 +153,16 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   chncfg->pan.bits.dipan = dipan;
   chncfg->pan.bits.disdl = 7u;
 
-    printf("[SFX] regs slot=%u pcms=%u sa_hi=%u sa_lo=0x%04x fns_oct=0x%04x tl=%u disdl=%u\n",
-      cmd0->slot,
-      chncfg->play_ctrl.bits.pcms,
-      chncfg->play_ctrl.bits.sa_high,
-      chncfg->sa_low,
-      chncfg->pitch.raw,
-      chncfg->env_fm.bits.tl,
-      chncfg->pan.bits.disdl);
+  printf("[SFX] regs slot=%u pcms=%u sa_hi=%u sa_lo=0x%04x fns_oct=0x%04x "
+         "tl=%u disdl=%u\n",
+         cmd0->slot, chncfg->play_ctrl.bits.pcms,
+         chncfg->play_ctrl.bits.sa_high, chncfg->sa_low, chncfg->pitch.raw,
+         chncfg->env_fm.bits.tl, chncfg->pan.bits.disdl);
 
   cursor += sizeof(uint32_t) + sizeof(uint16_t) +
             (size_t)cmd0->length * sizeof(uint16_t);
 
   uint32_t flow_size = (uint32_t)(cursor - (blob + flow_off));
-
-  /* META section */
-  uint32_t meta_off = (uint32_t)(cursor - blob);
-  afx_meta_t *meta = (afx_meta_t *)cursor;
-  meta->version = AFX_META_VERSION;
-  meta->required_channels = 1u;
-  cursor += sizeof(afx_meta_t);
 
   /* Patch section table */
   sects[0].id = AFX_SECT_FLOW;
@@ -179,33 +170,24 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   sects[0].size = flow_size;
   sects[0].count = 1u;
   sects[0].align = 4u;
-  
-  sects[1].id = AFX_SECT_META;
-  sects[1].offset = meta_off;
-  sects[1].size = sizeof(afx_meta_t);
-  sects[1].count = 1u;
-  sects[1].align = 4u;
 
   uint32_t song_spu = afx_upload_afx(blob, (uint32_t)(cursor - blob));
   if (!song_spu) {
     printf("[SFX] afx_upload_afx failed\n");
     return 0;
   }
-  uint32_t flow_spu = afx_create_flow(song_spu);
-  if (!flow_spu) {
-    printf("[SFX] afx_create_flow failed: song_spu=0x%08lx\n", (unsigned long)song_spu);
+  uint8_t flow_slot = afx_flow_init(song_spu);
+  if (flow_slot == 0xFFu) {
+    printf("[SFX] afx_flow_init failed: song_spu=0x%08lx\n",
+           (unsigned long)song_spu);
     afx_free_afx(song_spu);
-    return 0;
+    return 0xFFu;
   }
-  printf("[SFX] flow created: song_spu=0x%08lx flow_spu=0x%08lx flow_size=%lu\n",
-         (unsigned long)song_spu,
-         (unsigned long)flow_spu,
-         (unsigned long)flow_size);
-  return flow_spu;
+  printf("[SFX] flow created: song_spu=0x%08lx flow_slot=%u flow_size=%lu\n",
+         (unsigned long)song_spu, (unsigned)flow_slot,
+         (unsigned long)hdr->total_ticks);
+  return flow_slot;
 }
-
-/* SPU RAM is mapped at this fixed address on SH4 */
-#define SPU_RAM_BASE_SH4 0xA0800000u
 
 /*
  * Poll and free any flows that the ARM7 has finished draining.
@@ -213,16 +195,15 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
  * a flow-state allocation; both are released here.
  */
 static void drain_completed_flows(void) {
-  uint32_t flow_spu, seq;
-  while (afx_poll_completed_flow(&flow_spu, &seq)) {
+  uint8_t flow_slot;
+  while (afx_flow_poll_completed(&flow_slot)) {
+    uint32_t flow_spu = (uint32_t)flow_slot_to_addr(flow_slot);
     const volatile afx_flow_state_t *fs =
         (const volatile afx_flow_state_t *)(SPU_RAM_BASE_SH4 + flow_spu);
     uint32_t song_spu = fs->afx_base;
-    printf("[SFX] completed: seq=%lu flow_spu=0x%08lx song_spu=0x%08lx\n",
-           (unsigned long)seq,
-           (unsigned long)flow_spu,
-           (unsigned long)song_spu);
-    afx_release_channels(flow_spu);
+    printf("[SFX] completed: flow_slot=%u song_spu=0x%08lx\n",
+           (unsigned)flow_slot, (unsigned long)song_spu);
+    afx_channels_release(flow_slot);
     afx_free_afx(song_spu);
     afx_mem_free(flow_spu, sizeof(afx_flow_state_t));
   }
@@ -231,15 +212,14 @@ static void drain_completed_flows(void) {
 static void play_sfx(void *data) {
   drain_completed_flows();
   SPE_state_t *state = (SPE_state_t *)data;
-  printf("[SFX] trigger: idx=%d pan=%u handle=%d\n",
-         state->cursor_pos,
-         state->pan,
-         state->sounds[state->cursor_pos]);
+  printf("[SFX] trigger: idx=%d pan=%u handle=%d\n", state->cursor_pos,
+         state->pan, state->sounds[state->cursor_pos]);
   if (state->sounds[state->cursor_pos] != -1) {
-    uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos], state->pan);
-    if (flow){
+    uint32_t flow =
+        create_sfx_flow((uint32_t)state->sounds[state->cursor_pos], state->pan);
+    if (flow) {
       printf("[SFX] play flow: 0x%08lx\n", (unsigned long)flow);
-      afx_play_flow(flow);
+      afx_flow_play(flow);
     } else {
       printf("[SFX] play failed: flow create returned 0\n");
     }
@@ -385,7 +365,8 @@ int main(__unused int argc, __unused char **argv) {
   enj_mode_push(&main_mode);
   enj_state_run();
 
-  for (int i = 0; i < (int)(sizeof(rat_state.sounds) / sizeof(rat_state.sounds[0])); i++) {
+  for (int i = 0;
+       i < (int)(sizeof(rat_state.sounds) / sizeof(rat_state.sounds[0])); i++) {
     if (rat_state.sounds[i] != -1) {
       afx_sample_free(rat_state.sounds[i]);
     }

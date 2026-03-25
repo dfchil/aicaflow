@@ -882,12 +882,7 @@ int main(int argc, char **argv) {
     free(sort_buffer);
     free(flow_stream_buffer);
 
-    uint32_t required_channels = remap_flow_slots_minimize(sorted_flow, flow_stream_size);
-    afx_meta_t meta = {
-        .version = AFX_META_VERSION,
-        .required_channels = required_channels,
-        .reserved = {0, 0},
-    };
+    header.required_channels = remap_flow_slots_minimize(sorted_flow, flow_stream_size);
 
     afx_section_entry_t sections[4];
     uint32_t section_count = 0;
@@ -914,16 +909,6 @@ int main(int argc, char **argv) {
         .flags = 0,
     };
     cursor = AFX_ALIGN32(cursor + sdes_bytes);
-
-    sections[section_count++] = (afx_section_entry_t){
-        .id = AFX_SECT_META,
-        .offset = cursor,
-        .size = (uint32_t)sizeof(meta),
-        .count = 1,
-        .align = 32,
-        .flags = 0,
-    };
-    cursor = AFX_ALIGN32(cursor + (uint32_t)sizeof(meta));
 
     sections[section_count++] = (afx_section_entry_t){
         .id = AFX_SECT_SDAT,
@@ -966,13 +951,6 @@ int main(int argc, char **argv) {
         pos++;
     }
 
-    fwrite(&meta, sizeof(meta), 1, f_out);
-    pos = ftell(f_out);
-    while ((uint32_t)pos < sections[3].offset) {
-        fputc(0, f_out);
-        pos++;
-    }
-
     fseek(f_samples, 0, SEEK_SET);
     uint8_t copy_buf[4096];
     size_t n = 0;
@@ -986,6 +964,6 @@ int main(int argc, char **argv) {
     fclose(f_mid);
     fclose(f_out);
     printf("Success: Generated %s with %u flow ops (%u bytes). Duration: %ums. Required channels: %u\n",
-           output_afx, flow_op_count, flow_stream_size, max_timestamp, required_channels);
+           output_afx, flow_op_count, flow_stream_size, max_timestamp, header.required_channels);
     return 0;
 }

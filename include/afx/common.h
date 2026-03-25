@@ -5,6 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Memory Map Constants */
+#define AFX_MEM_CLOCKS (AICA_TOTAL_RAM - 32)
+
+/* Register Offsets */
+#define AICA_REG_BASE 0x00800000
+
+
 #define AICAF_MAGIC 0xA1CAF100
 #define AICAF_VERSION 1
 #define AICA_BASE_FREQ 44100.0f
@@ -47,8 +54,8 @@
 #define AFX_FLOW_STOPPED 0u /* Not playing, channels free */
 #define AFX_FLOW_PLAYING 1u /* Actively stepping commands */
 #define AFX_FLOW_PAUSED 2u  /* Command step paused, channels held */
-#define AFX_FLOW_DRAINING                                                      \
-  3u /* Commands done, waiting for HW channels to go silent */
+#define AFX_FLOW_RETIRED 3u /* Commands done, waiting for HW channels to go silent */
+#define AFX_FLOW_AVAILABLE 4u /* Available for new flow (not in retired list) */
 
 /* SH4 -> ARM7 Command IDs */
 #define AICAF_CMD_NONE 0
@@ -69,11 +76,13 @@
 typedef struct {
   uint32_t magic;   /* AICAF_MAGIC */
   uint32_t version; /* AICAF_VERSION */
-  uint32_t
-      section_count; /* Number of sections immediately following this header */
   uint32_t total_ticks; /* Total song duration in ms */
-  uint32_t flags;       /* Reserved */
+  uint8_t section_count; /* Number of sections immediately following this header */
+  uint8_t required_channels; /* Peak channels needed by song playback, mandatory */
+  uint16_t flags;       /* Reserved */
 } afx_header_t;
+
+// _Static_assert(sizeof(afx_header_t) == 20u, "afx_header_t size mismatch");
 
 /* Section table entry */
 typedef struct {
@@ -101,12 +110,6 @@ typedef struct {
   uint32_t sample_rate; /* original sample rate in Hz */
 } afx_sample_desc_t;
 
-/* Optional META section payload. */
-typedef struct {
-  uint32_t version;            /* AFX_META_VERSION */
-  uint32_t required_channels;  /* Peak channels needed by song playback */
-  uint32_t reserved[2];        /* Reserved for future metadata */
-} afx_meta_t;
 
 /* Flow command (8 bytes) */
 typedef struct {
@@ -317,18 +320,5 @@ typedef struct {
 } afx_ipc_cmd_t;
 
 #pragma pack(pop)
-
-/* Memory Map Constants */
-#define AFX_MEM_CLOCKS (AICA_TOTAL_RAM - 32)
-#define AFX_IPC_QUEUE_SZ 0x0400
-
-/* Register Offsets */
-#define AICA_REG_BASE 0x00800000
-
-/* Resolve a file-relative offset to an absolute SPU address. */
-static inline uint32_t afx_resolve_file_offset(uint32_t afx_base,
-                                               uint32_t relative_offset) {
-  return afx_base + relative_offset;
-}
 
 #endif /* AFX_COMMON_H */

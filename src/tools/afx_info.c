@@ -114,13 +114,11 @@ int main(int argc, char **argv) {
     const afx_section_entry_t *s_flow = NULL;
     const afx_section_entry_t *s_sdes = NULL;
     const afx_section_entry_t *s_sdat = NULL;
-    const afx_section_entry_t *s_meta = NULL;
 
     for (uint32_t i = 0; i < head.section_count; i++) {
         if (sections[i].id == AFX_SECT_FLOW) s_flow = &sections[i];
         if (sections[i].id == AFX_SECT_SDES) s_sdes = &sections[i];
         if (sections[i].id == AFX_SECT_SDAT) s_sdat = &sections[i];
-        if (sections[i].id == AFX_SECT_META) s_meta = &sections[i];
     }
 
     if (!s_flow || !s_sdes || !s_sdat) {
@@ -137,18 +135,7 @@ int main(int argc, char **argv) {
     uint32_t flow_data_off    = s_flow->offset;
     uint32_t flow_data_size   = s_flow->size;
     uint32_t total_ticks      = head.total_ticks;
-    uint32_t stored_required_channels = 0;
-    bool have_required_channels = false;
-
-    if (s_meta && s_meta->size >= sizeof(afx_meta_t)) {
-        afx_meta_t meta;
-        fseek(f, s_meta->offset, SEEK_SET);
-        if (fread(&meta, sizeof(meta), 1, f) == 1 &&
-            meta.version == AFX_META_VERSION) {
-            stored_required_channels = meta.required_channels;
-            have_required_channels = true;
-        }
-    }
+    uint32_t stored_required_channels = head.required_channels;
 
     uint32_t flow_cmd_count = s_flow->count;
     double sample_pct = (double)sample_data_size / total_size * 100.0;
@@ -170,9 +157,7 @@ int main(int argc, char **argv) {
     printf("Samples:    %u bytes (%.1f%%) (at offset 0x%X)\n", sample_data_size, sample_pct, sample_data_off);
     printf("Flow Data:  %u bytes (%.1f%%) (at offset 0x%X)\n", flow_data_size, flow_cmd_pct, flow_data_off);
     printf("Flow Cmds:  %u entries\n", flow_cmd_count);
-    if (have_required_channels) {
-        printf("Required Channels: %u\n", stored_required_channels);
-    }
+    printf("Required Channels: %u\n", stored_required_channels);
     printf("--------------------------------------\n");
 
     // Scan flow commands to gather register usage stats and correlate sample address usage with sample descriptors
@@ -276,12 +261,7 @@ int main(int argc, char **argv) {
                 }
             }
         }
-
-        if (!have_required_channels) {
-            printf("Required Channels: %u (derived)\n", derived_required_channels);
-            printf("--------------------------------------\n");
-        }
-
+        printf("Required Channels: %u (derived)\n", derived_required_channels);
         printf("Flow Command Register Distribution:\n");
         for (int i = 0; i < 14; i++) {
             if (stats[i].count > 0) {

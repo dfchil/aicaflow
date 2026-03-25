@@ -50,9 +50,11 @@ $(DRIVER_INCLUDE): $(DRIVER)
 	@mkdir -p $(dir $@)
 	$(KOS_BASE)/utils/bin2c/bin2c $< $@ afx_driver
 
-$(HOSTLIB): afx_host_lib.c $(DRIVER_INCLUDE)
+$(HOSTLIB): afx_host_lib.c afx_memory.c $(DRIVER_INCLUDE)
 	@mkdir -p $(LIBDIR)
-	$(KOS_CC) $(KOS_CFLAGS) -I../../include -c $< -o $@
+	$(KOS_CC) $(KOS_CFLAGS) -I../../include -c afx_host_lib.c -o $(BUILD_DIR)/afx_host_lib.o
+	$(KOS_CC) $(KOS_CFLAGS) -I../../include -c afx_memory.c -o $(BUILD_DIR)/afx_memory.o
+	$(KOS_AR) rcs $(HOSTLIB) $(BUILD_DIR)/afx_host_lib.o $(BUILD_DIR)/afx_memory.o
 
 clean:
 	rm -f $(HOSTLIB) $(DRIVER_INCLUDE)
