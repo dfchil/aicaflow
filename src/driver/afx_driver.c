@@ -175,10 +175,18 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow, uin
 }
 
 /* Returns non-zero if every slot in the mask has its SGLT completion bit set. */
-static inline uint32_t channels_all_silent(uint64_t mask) {
+
+/* Returns non-zero if every slot in the mask has KYONB (bit 14) cleared. */
+static inline uint32_t channels_all_kyoff(uint64_t mask) {
     if (mask == 0) return 1u;
-    uint64_t sglt = ((uint64_t)*AICA_SGLT_HI << 32) | *AICA_SGLT_LO;
-    return ((sglt & mask) == mask) ? 1u : 0u;
+    for (uint32_t slot = 0; slot < 64u; ++slot) {
+        if (!(mask & (1ULL << slot))) continue;
+        volatile uint16_t *play_ctrl = (volatile uint16_t *)(AICA_REG_BASE + (slot << 7));
+        if ((*play_ctrl & 0x4000u) != 0u) { // KYONB is bit 14
+            return 0u;
+        }
+    }
+    return 1u;
 }
 
 static inline void signal_flow_completed(uint32_t flow_addr) {
@@ -299,7 +307,7 @@ void arm_main(void) {
                 }
             } else if (flow->is_playing == AFX_FLOW_DRAINING) {
                 active = 1;
-                if (channels_all_silent(flow->assigned_channels)) {
+                if (channels_all_kyoff(flow->assigned_channels)) {
                     uint32_t completed_addr = ptr_to_u32(flow);
                     flow->is_playing = AFX_FLOW_STOPPED;
                     list_remove(flow);

@@ -11,12 +11,38 @@ int fDaValidateHeader(const fDcAudioHeader *dca);
 size_t fDaCalcChannelSizeBytes(const fDcAudioHeader *dca);
 unsigned fDaConvertFrequency(unsigned int freq_hz);
 
+static int probe_afx_driver_clock(void) {
+  uint32_t start_tick = afx_get_tick();
+  uint32_t end_tick = start_tick;
+
+  for (volatile uint32_t spin = 0; spin < 5000000u; ++spin) {
+    if ((spin & 0x3FFFu) == 0u) {
+      end_tick = afx_get_tick();
+      if (end_tick != start_tick) {
+        break;
+      }
+    }
+  }
+
+  printf("[SFX] driver tick probe: start=%lu end=%lu %s\n",
+         (unsigned long)start_tick,
+         (unsigned long)end_tick,
+         (start_tick != end_tick) ? "(running)" : "(stalled)");
+  return start_tick != end_tick;
+}
+
 static int init_afx_driver(void) {
   if (!afx_init()) {
     printf("[SFX] afx_init failed\n");
     return -1;
   }
   printf("[SFX] afx_init ok\n");
+
+  if (!probe_afx_driver_clock()) {
+    printf("[SFX] driver clock did not advance; ARM driver may not be running\n");
+    return -1;
+  }
+
   return 0;
 }
 
@@ -68,6 +94,14 @@ typedef struct {
   int sounds[6];
 } SPE_state_t;
 
+typedef struct {
+  uint32_t flow_spu;
+  uint32_t song_spu;
+} SFX_active_flow_t;
+
+#define SFX_MAX_ACTIVE_FLOWS 32
+static SFX_active_flow_t g_active_flows[SFX_MAX_ACTIVE_FLOWS];
+
 /*
  * Build a single-shot .afx flow in memory for a pre-uploaded sample.
  * Uses AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS so the FLOW commands embed
@@ -85,9 +119,17 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
              : (info.bitsize ==  8) ? info.length
              :                        info.length * 2;
   if (info.channels > 1) n /= info.channels;
+  uint32_t n_clamped = (n >= 65535u) ? 65534u : n;
   uint32_t duration_ms = n ? (n * 1000u) / info.rate + 1u : 1000u;
 
-  uint8_t  dipan     = (uint8_t)((uint32_t)pan * 0x1Fu / 255u);
+  uint8_t dipan;
+  if (pan == 0x80u) {
+    dipan = 0u;
+  } else if (pan < 0x80u) {
+    dipan = (uint8_t)(0x10u | ((0x7Fu - pan) >> 3));
+  } else {
+    dipan = (uint8_t)((pan - 0x80u) >> 3);
+  }
 
     printf("[SFX] sample=%lu spu=0x%08lx len=%lu rate=%lu bits=%u ch=%u pan=%u dipan=%u dur=%lums\n",
       (unsigned long)sample_handle,
@@ -106,6 +148,8 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
       (uint16_t)((offsetof(aica_chnl_packed_t, pan) + sizeof(uint16_t) -
                   offsetof(aica_chnl_packed_t, play_ctrl)) /
                  sizeof(uint16_t));
+  const uint16_t reg_resonance =
+      (uint16_t)(offsetof(aica_chnl_packed_t, resonance) / sizeof(uint16_t));
 
   uint8_t blob[256];
   memset(blob, 0, sizeof(blob));
@@ -139,7 +183,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   chncfg->play_ctrl.bits.ssctl = 0u;
   chncfg->sa_low = (uint16_t)(info.spu_addr & 0xFFFFu);
   chncfg->lsa = 0u;
-  chncfg->lea = 0u;
+  chncfg->lea = (uint16_t)n_clamped;
   chncfg->env_ad.bits.ar = 31u;
   chncfg->env_ad.bits.d1r = 0u;
   chncfg->env_ad.bits.d2r = 0u;
@@ -150,7 +194,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   chncfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
   chncfg->env_fm.bits.tl = 0u;
   chncfg->pan.bits.dipan = dipan;
-  chncfg->pan.bits.disdl = 7u;
+  chncfg->pan.bits.disdl = 0xFu;
 
     printf("[SFX] regs slot=%u pcms=%u sa_hi=%u sa_lo=0x%04x fns_oct=0x%04x tl=%u disdl=%u\n",
       cmd0->slot,
@@ -163,6 +207,18 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
 
   cursor += sizeof(uint32_t) + sizeof(uint16_t) +
             (size_t)cmd0->length * sizeof(uint16_t);
+  cursor += ((uintptr_t)cursor & 3u) ? (4u - ((uintptr_t)cursor & 3u)) : 0u;
+
+  /* Match KOS default LPF setup (CHNREG8 at +40 = 0x24). */
+  afx_cmd_t *cmd1 = (afx_cmd_t *)cursor;
+  cmd1->timestamp = 0;
+  cmd1->slot = 0;
+  cmd1->offset = reg_resonance;
+  cmd1->length = 1;
+  cmd1->values[0] = 0x24u;
+  cursor += sizeof(uint32_t) + sizeof(uint16_t) +
+            (size_t)cmd1->length * sizeof(uint16_t);
+  cursor += ((uintptr_t)cursor & 3u) ? (4u - ((uintptr_t)cursor & 3u)) : 0u;
 
   uint32_t flow_size = (uint32_t)(cursor - (blob + flow_off));
 
@@ -177,7 +233,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   sects[0].id = AFX_SECT_FLOW;
   sects[0].offset = flow_off;
   sects[0].size = flow_size;
-  sects[0].count = 1u;
+  sects[0].count = 2u;
   sects[0].align = 4u;
   
   sects[1].id = AFX_SECT_META;
@@ -206,26 +262,115 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
 
 /* SPU RAM is mapped at this fixed address on SH4 */
 #define SPU_RAM_BASE_SH4 0xA0800000u
+/* AICA channel registers are mapped at this fixed address on SH4 */
+#define AICA_REG_BASE_SH4 0xA0700000u
 
 /*
- * Poll and free any flows that the ARM7 has finished draining.
- * Each flow created by create_sfx_flow owns its own afx blob and
- * a flow-state allocation; both are released here.
+ * Track flows locally and retire them when all assigned channels have
+ * transitioned to key-off (key_on_ex == 0).
  */
+static int flow_all_channels_keyoff(uint32_t flow_spu) {
+  const volatile afx_flow_state_t *fs =
+      (const volatile afx_flow_state_t *)(SPU_RAM_BASE_SH4 + flow_spu);
+  uint64_t mask = fs->assigned_channels;
+
+  for (uint32_t slot = 0; slot < 64u; ++slot) {
+    if (!(mask & (1ULL << slot))) {
+      continue;
+    }
+
+    volatile uint16_t *play_ctrl =
+        (volatile uint16_t *)(AICA_REG_BASE_SH4 + (slot << 7));
+    if ((*play_ctrl & 0x8000u) != 0u) {
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+static void register_active_flow(uint32_t flow_spu) {
+  const volatile afx_flow_state_t *fs =
+      (const volatile afx_flow_state_t *)(SPU_RAM_BASE_SH4 + flow_spu);
+  for (int i = 0; i < SFX_MAX_ACTIVE_FLOWS; ++i) {
+    if (g_active_flows[i].flow_spu == 0) {
+      g_active_flows[i].flow_spu = flow_spu;
+      g_active_flows[i].song_spu = fs->afx_base;
+      return;
+    }
+  }
+  printf("[SFX] warning: active flow table full, flow=0x%08lx\n",
+         (unsigned long)flow_spu);
+}
+
 static void drain_completed_flows(void) {
-  uint32_t flow_spu, seq;
-  while (afx_poll_completed_flow(&flow_spu, &seq)) {
-    const volatile afx_flow_state_t *fs =
-        (const volatile afx_flow_state_t *)(SPU_RAM_BASE_SH4 + flow_spu);
-    uint32_t song_spu = fs->afx_base;
-    printf("[SFX] completed: seq=%lu flow_spu=0x%08lx song_spu=0x%08lx\n",
-           (unsigned long)seq,
+  for (int i = 0; i < SFX_MAX_ACTIVE_FLOWS; ++i) {
+    uint32_t flow_spu = g_active_flows[i].flow_spu;
+    if (!flow_spu) {
+      continue;
+    }
+
+    if (!flow_all_channels_keyoff(flow_spu)) {
+      continue;
+    }
+
+    uint32_t song_spu = g_active_flows[i].song_spu;
+    printf("[SFX] completed(keyoff): flow_spu=0x%08lx song_spu=0x%08lx\n",
            (unsigned long)flow_spu,
            (unsigned long)song_spu);
     afx_release_channels(flow_spu);
+    printf("[SFX] channels freed: flow_spu=0x%08lx\n", (unsigned long)flow_spu);
     afx_free_afx(song_spu);
     afx_mem_free(flow_spu, sizeof(afx_flow_state_t));
+    g_active_flows[i].flow_spu = 0;
+    g_active_flows[i].song_spu = 0;
   }
+}
+
+static int probe_flow_dispatch(uint32_t flow_spu) {
+  const volatile afx_flow_state_t *fs =
+      (const volatile afx_flow_state_t *)(SPU_RAM_BASE_SH4 + flow_spu);
+  uint8_t hw_slot = fs->channel_map[0];
+  if (hw_slot == 0xFFu) {
+    printf("[SFX] cmd probe: invalid channel map for flow 0x%08lx\n",
+           (unsigned long)flow_spu);
+    return 0;
+  }
+
+    const afx_cmd_t *cmd0 =
+      (const afx_cmd_t *)(SPU_RAM_BASE_SH4 + fs->flow_ptr);
+    if (cmd0->length < 2u) {
+    printf("[SFX] cmd probe: cmd0 too short (len=%u)\n", cmd0->length);
+    return 0;
+    }
+
+    uint16_t reg_probe = (uint16_t)(cmd0->offset + 1u); /* usually sa_low */
+    uint16_t expected = cmd0->values[1];
+  volatile uint16_t *probe_reg = (volatile uint16_t *)(
+      AICA_REG_BASE_SH4 + ((uint32_t)hw_slot << 7) + ((uint32_t)reg_probe << 2));
+
+    *probe_reg = 0u; /* Sentinel value; flow startup should overwrite this. */
+  uint16_t before = *probe_reg;
+
+  afx_play_flow(flow_spu);
+
+  uint16_t after = before;
+  for (volatile uint32_t spin = 0; spin < 2000000u; ++spin) {
+    after = *probe_reg;
+    if (after != before) {
+      break;
+    }
+  }
+
+    printf("[SFX] cmd probe: flow=0x%08lx slot=%u reg=%u expected=0x%04x before=0x%04x after=0x%04x %s\n",
+         (unsigned long)flow_spu,
+         hw_slot,
+      reg_probe,
+      expected,
+         before,
+         after,
+      (after == expected) ? "(dispatch ok)" : "(dispatch not observed)");
+    return after == expected;
 }
 
 static void play_sfx(void *data) {
@@ -237,9 +382,17 @@ static void play_sfx(void *data) {
          state->sounds[state->cursor_pos]);
   if (state->sounds[state->cursor_pos] != -1) {
     uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos], state->pan);
+    if (!flow) {
+      /* Retry once after draining in case channels just became available. */
+      drain_completed_flows();
+      flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos], state->pan);
+    }
     if (flow){
       printf("[SFX] play flow: 0x%08lx\n", (unsigned long)flow);
-      afx_play_flow(flow);
+      if (!probe_flow_dispatch(flow)) {
+        printf("[SFX] warning: flow dispatch probe failed\n");
+      }
+      register_active_flow(flow);
     } else {
       printf("[SFX] play failed: flow create returned 0\n");
     }
