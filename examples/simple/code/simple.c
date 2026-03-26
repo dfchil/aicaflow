@@ -17,7 +17,7 @@
 #define drv_state_ptr                                                          \
   ((volatile afx_driver_state_t *)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR))
 
-  
+
 int fDaValidateHeader(const fDcAudioHeader *dca);
 size_t fDaCalcChannelSizeBytes(const fDcAudioHeader *dca);
 unsigned fDaConvertFrequency(unsigned int freq_hz);
@@ -126,7 +126,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   afx_header_t *hdr = (afx_header_t *)(blob);
   hdr->magic = AICAF_MAGIC;
   hdr->version = AICAF_VERSION;
-  hdr->section_count = 2u;
+  hdr->section_count = 1u;
   hdr->total_ticks = duration_ms;
   hdr->flags = AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS;
   hdr->required_channels = 1u;

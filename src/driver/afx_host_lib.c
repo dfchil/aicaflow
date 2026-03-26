@@ -275,8 +275,8 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
   flow_template.status = AFX_FLOW_STOPPED;
 
   /* map virtual channels */
+  uint32_t flow_chn = 0;
   for (uint32_t hw = 0; hw < 64u; hw++) {
-    uint32_t flow_chn = 0;
     if (channel_mask & (1ULL << hw)) {
       afx_channel_map_set(flow_template.channel_map, flow_chn++, hw);
     }
@@ -305,14 +305,14 @@ bool afx_flow_set_tl_scale_lut(uint8_t flow_slot, uint32_t lut_spu_addr) {
 }
 
 void afx_flow_play(uint8_t flow_slot) {
-//   uint32_t flow_addr = drv_state_ptr->flow_states[flow_slot].afx_base +
-//                        offsetof(afx_flow_state_t, tl_scale_lut_ptr);
-//   if (flow_addr != 0) {
-//     volatile afx_flow_state_t *flow =
-//         (volatile afx_flow_state_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + flow_addr);
-//     apply_song_dsp_sections_host(flow->afx_base);
-//   }
-  drv_state_ptr->flow_states[flow_slot].status = AFX_FLOW_PLAYING;
+  if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
+    return;
+
+  volatile afx_flow_state_t *flow_state = &drv_state_ptr->flow_states[flow_slot];
+  if (flow_state->afx_base != 0) {
+    apply_song_dsp_sections_host(flow_state->afx_base);
+  }
+  flow_state->status = AFX_FLOW_PLAYING;
 }
 
 void afx_flow_pause(uint8_t flow_slot) {
