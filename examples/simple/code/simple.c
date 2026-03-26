@@ -1,4 +1,5 @@
 #include <afx/host.h>
+#include <afx/aica_channel.h>
 #include <enDjinn/enj_enDjinn.h>
 #include <enDjinn/ext/dca_file.h>
 #include <stddef.h>
@@ -7,16 +8,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define AICA_CLOCK_ADDR 0x001FFFE0 /* Reserve uppermost 4 words for clock registers */
+
+#define AICA_HW_CLOCK      ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR))
+#define AICA_PREV_HW_CLOCK ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 4))
+#define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 8))
+
+#define drv_state_ptr                                                          \
+  ((volatile afx_driver_state_t *)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR))
+
+  
 int fDaValidateHeader(const fDcAudioHeader *dca);
 size_t fDaCalcChannelSizeBytes(const fDcAudioHeader *dca);
 unsigned fDaConvertFrequency(unsigned int freq_hz);
 
 static int init_afx_driver(void) {
   if (!afx_init()) {
-    printf("[SFX] afx_init failed\n");
+    printf("afx_init failed\n");
     return -1;
   }
-  printf("[SFX] afx_init ok\n");
+  printf("afx_init ok\n");
   return 0;
 }
 
@@ -66,6 +77,7 @@ typedef struct {
     uint32_t reserved : 12;
   };
   int sounds[6];
+  uint32_t flows[6];
 } SPE_state_t;
 
 /**
@@ -95,7 +107,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   uint8_t dipan = (uint8_t)((uint32_t)pan * 0x1Fu / 255u);
 
   printf("[SFX] sample=%lu spu=0x%08lx len=%lu rate=%lu bits=%u ch=%u pan=%u "
-         "dipan=%u dur=%lums\n",
+         "dipan=%u dur=%lums\n\n",
          (unsigned long)sample_handle, (unsigned long)info.spu_addr,
          (unsigned long)info.length, (unsigned long)info.rate, info.bitsize,
          info.channels, pan, dipan, (unsigned long)duration_ms);
@@ -117,6 +129,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   hdr->section_count = 2u;
   hdr->total_ticks = duration_ms;
   hdr->flags = AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS;
+  hdr->required_channels = 1u;
 
   /* Section table */
   afx_section_entry_t *sects =
@@ -171,58 +184,36 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   sects[0].count = 1u;
   sects[0].align = 4u;
 
-  uint32_t song_spu = afx_upload_afx(blob, (uint32_t)(cursor - blob));
-  if (!song_spu) {
+  uint32_t flow_spu_addr = afx_upload_afx(blob, (uint32_t)(cursor - blob));
+  if (!flow_spu_addr) {
     printf("[SFX] afx_upload_afx failed\n");
     return 0;
   }
-  uint8_t flow_slot = afx_flow_init(song_spu);
-  if (flow_slot == 0xFFu) {
-    printf("[SFX] afx_flow_init failed: song_spu=0x%08lx\n",
-           (unsigned long)song_spu);
-    afx_free_afx(song_spu);
-    return 0xFFu;
-  }
-  printf("[SFX] flow created: song_spu=0x%08lx flow_slot=%u flow_size=%lu\n",
-         (unsigned long)song_spu, (unsigned)flow_slot,
-         (unsigned long)hdr->total_ticks);
-  return flow_slot;
-}
-
-/*
- * Poll and free any flows that the ARM7 has finished draining.
- * Each flow created by create_sfx_flow owns its own afx blob and
- * a flow-state allocation; both are released here.
- */
-static void drain_completed_flows(void) {
-  uint8_t flow_slot;
-  while (afx_flow_poll_completed(&flow_slot)) {
-    uint32_t flow_spu = (uint32_t)flow_slot_to_addr(flow_slot);
-    const volatile afx_flow_state_t *fs =
-        (const volatile afx_flow_state_t *)(SPU_RAM_BASE_SH4 + flow_spu);
-    uint32_t song_spu = fs->afx_base;
-    printf("[SFX] completed: flow_slot=%u song_spu=0x%08lx\n",
-           (unsigned)flow_slot, (unsigned long)song_spu);
-    afx_channels_release(flow_slot);
-    afx_free_afx(song_spu);
-    afx_mem_free(flow_spu, sizeof(afx_flow_state_t));
-  }
+  return flow_spu_addr;
 }
 
 static void play_sfx(void *data) {
-  drain_completed_flows();
   SPE_state_t *state = (SPE_state_t *)data;
   printf("[SFX] trigger: idx=%d pan=%u handle=%d\n", state->cursor_pos,
          state->pan, state->sounds[state->cursor_pos]);
   if (state->sounds[state->cursor_pos] != -1) {
-    uint32_t flow =
-        create_sfx_flow((uint32_t)state->sounds[state->cursor_pos], state->pan);
-    if (flow) {
-      printf("[SFX] play flow: 0x%08lx\n", (unsigned long)flow);
-      afx_flow_play(flow);
-    } else {
-      printf("[SFX] play failed: flow create returned 0\n");
+    if (!state->flows[state->cursor_pos]) {
+      uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos],
+                                     state->pan);
+      if (flow) {
+        printf("[SFX] created flow: 0x%08lx\n", (unsigned long)flow);
+        state->flows[state->cursor_pos] = flow;
+      } else {
+        printf("[SFX] play failed: flow create returned 0\n");
+        return;
+      }
     }
+    printf("current tick: %u\n", *AICA_VIRTUAL_CLOCK);
+
+    uint8_t slot = afx_flow_activate(state->flows[state->cursor_pos]);
+    printf("[SFX] flow activate returned slot %u\n", drv_state_ptr->flow_count_active > 0 ? slot : 0xFFu);
+
+    afx_flow_play(slot);
   } else {
     printf("[SFX] trigger ignored: invalid sample handle\n");
   }
@@ -241,6 +232,7 @@ static const int num_sfx_menu_entries =
     sizeof(sfx_catalog) / sizeof(sfx_catalog[0]);
 
 #define MARGIN_LEFT 30
+
 void render(void *data) {
   SPE_state_t *state = (SPE_state_t *)data;
   enj_qfont_color_set(0x14, 0xaf, 255); /* Light Blue */
@@ -311,11 +303,9 @@ void main_mode_updater(void *data) {
     enj_ctrlr_state_t **ctrl_states = enj_ctrl_get_states();
     int delta = ctrl_states[state->active_controller]->button.UP ==
                         ENJ_BUTTON_DOWN_THIS_FRAME
-                    ? -1
-                : ctrl_states[state->active_controller]->button.DOWN ==
+                    ? -1 : ctrl_states[state->active_controller]->button.DOWN ==
                         ENJ_BUTTON_DOWN_THIS_FRAME
-                    ? 1
-                    : 0;
+                    ? 1  : 0;
     if (delta) {
       state->cursor_pos = (state->cursor_pos + delta) % num_sfx_menu_entries;
       if (state->cursor_pos < 0)
@@ -357,12 +347,15 @@ int main(__unused int argc, __unused char **argv) {
               load_dca_blob(clean_test_pcm16),
           },
   };
+
   enj_mode_t main_mode = {
       .name = "Main Mode",
       .mode_updater = main_mode_updater,
       .data = &rat_state,
   };
   enj_mode_push(&main_mode);
+  printf("sizeof afx_flow_state_t: %lu\n", (unsigned long)sizeof(afx_flow_state_t));
+
   enj_state_run();
 
   for (int i = 0;

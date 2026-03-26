@@ -25,7 +25,37 @@ bool afx_sample_free(uint32_t sample_handle);
 uint32_t afx_sample_get_spu_addr(uint32_t sample_handle);
 bool afx_sample_get_info(uint32_t sample_handle, afx_sample_info_t *out_info);
 
-uint64_t afx_channels_allocate(uint32_t num_channels);
-void afx_channels_release(uint8_t flow_slot);
+uint64_t afx_channels_allocate(uint8_t num_channels);
+void afx_channels_release(uint64_t channel_mask);
+
+
+static inline bool range_fits_dynamic(uint32_t addr, uint32_t size) {
+  if (size == 0)
+    return false;
+  if (addr >= AFX_DRIVER_STATE_ADDR)
+    return false;
+  if (addr + size < addr)
+    return false;
+  return (addr + size) <= AFX_DRIVER_STATE_ADDR;
+}
+
+static inline uint32_t align_up_u32(uint32_t value, uint32_t align) {
+  if (align == 0)
+    return value;
+  uint32_t mask = align - 1u;
+  return (value + mask) & ~mask;
+}
+
+static inline bool is_dynamic_range_valid(uint32_t addr, uint32_t size) {
+  if (size == 0)
+    return false;
+  if (addr < g_aica_state.dynamic_base)
+    return false;
+  if (addr >= AFX_DRIVER_STATE_ADDR)
+    return false;
+  if (addr + size < addr)
+    return false;
+  return (addr + size) <= AFX_DRIVER_STATE_ADDR;
+}
 
 #endif /* AFX_MEMORY_H */

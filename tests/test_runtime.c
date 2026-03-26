@@ -38,8 +38,7 @@ static void test_driver_state_abi(void) {
     /* Driver runtime state now uses array flow entries and counters. */
     assert(sizeof(afx_driver_state_t) == 520u);
     assert(offsetof(afx_driver_state_t, flow_count_active) == 0u);
-    assert(offsetof(afx_driver_state_t, flow_count_retired) == 1u);
-    assert(offsetof(afx_driver_state_t, flow_entries) == 4u);
+    assert(offsetof(afx_driver_state_t, flow_states) == 4u);
     assert(offsetof(afx_driver_state_t, stack_canary) == 260u);
     assert(offsetof(afx_driver_state_t, mini_stack) == 264u);
 

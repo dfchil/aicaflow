@@ -5,6 +5,7 @@
 #include <string.h>
 #include <afx/driver.h>
 #include <afx/host.h>
+#include <afx/aica_channel.h>
 
 /**
  * AICA Flow Information Tool (C23)

@@ -11,9 +11,13 @@ typedef struct {
        * the lower 16 bits are stored in sa_low. */
       uint16_t sa_high : 7;
 
-      /* PCM Format (0=16-bit PCM, 1=8-bit PCM, 2=ADPCM). Note that ADPCM
-       * samples are stored in the same sample data format as 16-bit PCM, but
-       * the AICA decodes them differently based on this field. */
+      /* PCM Format
+       * - 0=16-bit PCM
+       * - 1=8-bit PCM
+       * - 2=ADPCM
+       *
+       * @note ADPCM samples are stored in the same sample data format as 16-bit
+       * PCM, but the AICA decodes them differently based on this field. */
       uint16_t pcms : 2;
 
       /** Loop Control (0=No Loop, 1=Forward Loop).
@@ -24,7 +28,8 @@ typedef struct {
        * the end of the sample data. Properly setting the loop points and
        * enabling loop control allows for seamless looping of samples, which is
        * essential for sustaining notes or creating rhythmic patterns without
-       * gaps. Note that when using loop control, the AICA will ignore the
+       * gaps.
+       * @note when using loop control, the AICA will ignore the
        * key_off command until the sample is released (key_on goes low), so the
        * note will continue to play and loop until it is explicitly released.
        */
@@ -55,13 +60,14 @@ typedef struct {
        * key_on_ex takes priority:
        * - key_on=0, key_on_ex=1: Release note (enter envelope release).
        * - key_on=1, key_on_ex=1: Retrigger note from start.
-       * Use with care, as abrupt changes may occur if envelope settings are not
-       * suitable.
+       *
+       * @note Use with care, as abrupt changes may occur if envelope settings
+       * are not suitable.
        */
       uint16_t key_on_ex : 1;
     } bits;
-  } play_ctrl;  // 0x00 - Play Control Register (Format, Address High,
-                // Triggering)
+  } play_ctrl; // 0x00 - Play Control Register (Format, Address High,
+               // Triggering)
 
   /** Sample Address Low (0x04)
    * Lower 16 bits of the sample start address in AICA wave memory.
@@ -79,7 +85,7 @@ typedef struct {
   /** Loop End Address (0x0C)
    * Offset (in samples) from sample start address.
    * Actual address: sa + (lea * sample size in bytes).
-   * If looping (lpctl=1), playback jumps back to lsa at this point.
+   * @note If looping (lpctl=1), playback jumps back to lsa at this point.
    */
   uint16_t lea : 16;
   union {
@@ -89,9 +95,11 @@ typedef struct {
        * Attack Rate (0-31). Higher values cause the note to reach full volume
        * faster. A value of 0 means the note will never reach full volume (it
        * will stay at the initial level, which is typically silence), while 31
-       * means it will reach full volume very quickly. The actual time for
-       * attack depends on the key rate scaling (KRS) and the note's frequency,
-       * with higher notes attacking faster when KRS is applied.
+       * means it will reach full volume very quickly.
+       *
+       * @note The actual time for attack depends on the key rate scaling (KRS)
+       * and the note's frequency, with higher notes attacking faster when KRS
+       * is applied.
        */
       uint16_t ar : 5;
       uint16_t reserved1 : 1;
@@ -99,22 +107,26 @@ typedef struct {
       /* Decay 1 Rate (0-31). Higher values cause the note to drop from full
        * volume to the sustain level faster. A value of 0 means the note will
        * never decay (it will stay at full volume), while 31 means it will decay
-       * very quickly. The actual time for decay depends on the key rate scaling
-       * (KRS) and the note's frequency, with higher notes decaying faster when
-       * KRS is applied.
+       * very quickly.
+       *
+       * @note The actual time for decay depends on the key rate scaling (KRS)
+       * and the note's frequency, with higher notes decaying faster when KRS
+       * is applied.
        */
       uint16_t d1r : 5;
 
       /* Decay 2 Rate (0-31). Higher values cause the note to drop from the
        * sustain level to silence faster. A value of 0 means the note will
        * never decay from the sustain level (it will stay at the sustain level),
-       * while 31 means it will decay to silence very quickly. The actual time
-       * for decay depends on the key rate scaling (KRS) and the note's
-       * frequency, with higher notes decaying faster when KRS is applied.
+       * while 31 means it will decay to silence very quickly.
+       *
+       * @note The actual time for decay depends on the key rate scaling (KRS)
+       * and the note's frequency, with higher notes decaying faster when KRS
+       * is applied.
        */
       uint16_t d2r : 5;
     } bits;
-  } env_ad;  // 0x10 - Envelope Attack/Decay Rate Register
+  } env_ad; // 0x10 - Envelope Attack/Decay Rate Register
 
   union {
     uint16_t raw;
@@ -123,7 +135,9 @@ typedef struct {
        * Release Rate (0-31). Triggered when key_on goes low. Higher values
        * cause the note to fade out faster. A value of 0 means the note will
        * sustain indefinitely until released, while 31 means it will release
-       * very quickly. The actual time for release depends on the key rate
+       * very quickly.
+       *
+       * @note The actual time for release depends on the key rate
        * scaling (KRS) and the note's frequency, with higher notes releasing
        * faster when KRS is applied.
        */
@@ -137,14 +151,17 @@ typedef struct {
       uint16_t dl : 5;
 
       /** Key Rate Scaling.
-       * 0 [X] = Minimum scaling
-       * E [X] = Maximum scaling
-       * F [X] = Scaling OFF.
-       * Scaling is applied as a multiplier
-       * to the EG rates (AR, D1R, D2R, RR) based on the note's frequency
-       * relative to the base frequency (root note). Higher notes have faster
-       * rates, lower notes have slower rates. This allows for natural-sounding
-       * decay across the keyboard.
+       * 
+       * - 0 -> Minimum scaling
+       * - E -> Maximum scaling
+       * - F -> Scaling OFF.
+       * 
+       * Scaling is applied as a multiplier to the EG rates (AR, D1R, D2R, RR)
+       * based on the note's frequency relative to the base frequency (root
+       * note). 
+       * 
+       * @note Higher notes have faster rates, lower notes have slower rates.
+       * This allows for natural-sounding decay across the keyboard.
        */
       uint16_t krs : 4;
 
@@ -158,7 +175,7 @@ typedef struct {
       uint16_t lpslnk : 1;
       uint16_t reserved : 1;
     } bits;
-  } env_dr;  // 0x14 - Envelope Release Rate and Sustain Level Register
+  } env_dr; // 0x14 - Envelope Release Rate and Sustain Level Register
 
   union {
     uint16_t raw;
@@ -185,7 +202,7 @@ typedef struct {
       uint16_t oct : 4;
       uint16_t reserved2 : 1;
     } bits;
-  } pitch;  // 0x18 - Pitch/Frequency Register
+  } pitch; // 0x18 - Pitch/Frequency Register
 
   union {
     uint16_t raw;
@@ -251,7 +268,7 @@ typedef struct {
        */
       uint16_t lfore : 1;
     } bits;
-  } lfo;  // 0x1C - Low Frequency Oscillator Control
+  } lfo; // 0x1C - Low Frequency Oscillator Control
 
   union {
     uint16_t raw;
@@ -280,8 +297,8 @@ typedef struct {
       uint16_t tl : 8;
       uint16_t reserved2 : 1;
     } bits;
-  } env_fm;  // 0x20 - Envelope FM Control. Can modulate the EG rates and levels
-             // of other channels.
+  } env_fm; // 0x20 - Envelope FM Control. Can modulate the EG rates and levels
+            // of other channels.
 
   union {
     uint16_t raw;
@@ -324,7 +341,7 @@ typedef struct {
        */
       uint16_t imxl : 4;
     } bits;
-  } pan;  // 0x24 - Channel Panning and Direct Level Control
+  } pan; // 0x24 - Channel Panning and Direct Level Control
 
   union {
     uint16_t raw;
@@ -355,7 +372,7 @@ typedef struct {
       uint16_t q : 5;
       uint16_t reserved : 11;
     } bits;
-  } resonance;  // 0x28 - Resonance data
+  } resonance; // 0x28 - Resonance data
 
   /* FEG (Filter Envelope Generator) Levels. These can modulate the cutoff
    * frequency of the FEG filter over time, allowing for dynamic filtering
@@ -408,8 +425,8 @@ typedef struct {
        */
       uint16_t fd1r : 5;
     } bits;
-  } env_feg;  // 0x40 - Envelope FEG Control. Can modulate the FEG cutoff
-              // frequency of other channels.
+  } env_feg; // 0x40 - Envelope FEG Control. Can modulate the FEG cutoff
+             // frequency of other channels.
   union {
     uint16_t raw;
     struct {
@@ -435,9 +452,9 @@ typedef struct {
        */
       uint16_t frr : 5;
     } bits;
-  } env_feg2;  // 0x44 - Additional Envelope FEG Control. Can modulate the FEG
-               // cutoff frequency of other channels during decay 2 and release
-               // phases.
+  } env_feg2; // 0x44 - Additional Envelope FEG Control. Can modulate the FEG
+              // cutoff frequency of other channels during decay 2 and release
+              // phases.
 } aica_chnl_packed_t;
 
 #endif /* AFX_CHANNEL_REGS_H */

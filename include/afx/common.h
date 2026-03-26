@@ -53,11 +53,8 @@
 #define AFX_FLOW_STOPPED 0u /* Not playing, channels free */
 #define AFX_FLOW_PLAYING 1u /* Actively stepping commands */
 #define AFX_FLOW_PAUSED 2u  /* Command step paused, channels held */
-#define AFX_FLOW_RETIRED \
-  3u /* Commands done, waiting for HW channels to go silent */
-#define AFX_FLOW_AVAILABLE                           \
-  4u /* Available for new flow (not in retired list) \
-      */
+#define AFX_FLOW_RETIRED 3u /* Commands done, waiting for HW channels to go silent */
+#define AFX_FLOW_AVAILABLE 4u /* Available for new flow (not in retired list) */
 
 /* SH4 -> ARM7 Command IDs */
 #define AICAF_CMD_NONE 0

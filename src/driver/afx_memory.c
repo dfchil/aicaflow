@@ -1,4 +1,3 @@
-#include <afx/bin/driver_blob.h>
 #include <afx/host.h>
 #include <afx/memory.h>
 #include <stdbool.h>
@@ -17,6 +16,9 @@ uint64_t g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
 #define AFX_FREE_BLOCK_CAPACITY 128u
 #define AFX_SAMPLE_HANDLE_CAPACITY 64u
 #define AFX_AFX_ALLOC_CAPACITY 128u
+
+#define drv_state_ptr                                                          \
+  ((volatile afx_driver_state_t *)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR))
 
 typedef struct {
   uint32_t addr;
@@ -37,34 +39,6 @@ static uint64_t g_flow_pool_alloc_mask =
 static afx_free_block_t g_afx_allocs[AFX_AFX_ALLOC_CAPACITY];
 static uint32_t g_afx_alloc_count = 0;
 
-static inline bool range_fits_dynamic(uint32_t addr, uint32_t size) {
-  if (size == 0)
-    return false;
-  if (addr >= AFX_DRIVER_STATE_ADDR)
-    return false;
-  if (addr + size < addr)
-    return false;
-  return (addr + size) <= AFX_DRIVER_STATE_ADDR;
-}
-
-static inline uint32_t align_up_u32(uint32_t value, uint32_t align) {
-  if (align == 0)
-    return value;
-  uint32_t mask = align - 1u;
-  return (value + mask) & ~mask;
-}
-
-static inline bool is_dynamic_range_valid(uint32_t addr, uint32_t size) {
-  if (size == 0)
-    return false;
-  if (addr < g_aica_state.dynamic_base)
-    return false;
-  if (addr >= AFX_DRIVER_STATE_ADDR)
-    return false;
-  if (addr + size < addr)
-    return false;
-  return (addr + size) <= AFX_DRIVER_STATE_ADDR;
-}
 
 static void reset_sample_slots(void) {
   memset(g_sample_slots, 0, sizeof(g_sample_slots));
@@ -235,7 +209,7 @@ bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size) {
   return true;
 }
 
-uint64_t afx_channels_allocate(uint32_t num_channels, uint8_t flow_slot) {
+uint64_t afx_channels_allocate(uint8_t num_channels) {
   if (num_channels == 0 || num_channels > 64)
     return 0;
 
@@ -248,58 +222,124 @@ uint64_t afx_channels_allocate(uint32_t num_channels, uint8_t flow_slot) {
       num_channels--;
     }
   }
-
   if (num_channels != 0) {
     g_host_available_channels |= allocated;
     return 0;
   }
-
   return allocated;
 }
 
-void afx_channels_release(uint8_t flow_slot) {
-
-  uint32_t flow_addr = flow_slot_to_addr(flow_slot);
-  if (flow_addr == 0)
-    return;
-
-  volatile afx_flow_state_t *flow =
-      (volatile afx_flow_state_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + flow_addr);
-  uint64_t mask = flow->assigned_channels;
-  if (mask == 0)
-    return;
-
-  g_host_available_channels |= mask;
-  uint64_t zero = 0;
-  (void)afx_mem_write(flow_addr + offsetof(afx_flow_state_t, assigned_channels),
-                      &zero, sizeof(zero));
+void afx_channels_release(uint64_t channel_mask) {
+  g_host_available_channels |= channel_mask;
 }
 
 bool afx_sample_free(uint32_t sample_handle) {
-    uint32_t slot_idx = 0;
-    if (!resolve_sample_handle(sample_handle, &slot_idx)) return false;
+  uint32_t slot_idx = 0;
+  if (!resolve_sample_handle(sample_handle, &slot_idx))
+    return false;
 
-    afx_sample_slot_t *slot = &g_sample_slots[slot_idx];
-    if (!afx_mem_free(slot->info.spu_addr, slot->info.length)) return false;
+  afx_sample_slot_t *slot = &g_sample_slots[slot_idx];
+  if (!afx_mem_free(slot->info.spu_addr, slot->info.length))
+    return false;
 
-    slot->in_use = false;
-    memset(&slot->info, 0, sizeof(slot->info));
-    slot->generation++;
-    if (slot->generation == 0) slot->generation = 1;
-    return true;
+  slot->in_use = false;
+  memset(&slot->info, 0, sizeof(slot->info));
+  slot->generation++;
+  if (slot->generation == 0)
+    slot->generation = 1;
+  return true;
 }
 
 uint32_t afx_sample_get_spu_addr(uint32_t sample_handle) {
-    uint32_t slot_idx = 0;
-    if (!resolve_sample_handle(sample_handle, &slot_idx)) return 0;
-    return g_sample_slots[slot_idx].info.spu_addr;
+  uint32_t slot_idx = 0;
+  if (!resolve_sample_handle(sample_handle, &slot_idx))
+    return 0;
+  return g_sample_slots[slot_idx].info.spu_addr;
 }
 
 bool afx_sample_get_info(uint32_t sample_handle, afx_sample_info_t *out_info) {
-    uint32_t slot_idx = 0;
-    if (!out_info) return false;
-    if (!resolve_sample_handle(sample_handle, &slot_idx)) return false;
+  uint32_t slot_idx = 0;
+  if (!out_info)
+    return false;
+  if (!resolve_sample_handle(sample_handle, &slot_idx))
+    return false;
 
-    *out_info = g_sample_slots[slot_idx].info;
-    return true;
+  *out_info = g_sample_slots[slot_idx].info;
+  return true;
+}
+
+uint32_t afx_sample_upload(const char *buf, size_t len, uint32_t rate,
+                           uint8_t bitsize, uint8_t channels) {
+  if (!buf || len == 0 || len > UINT32_MAX)
+    return 0;
+  if (bitsize == 0 || channels == 0)
+    return 0;
+
+  uint32_t slot_idx = AFX_SAMPLE_HANDLE_CAPACITY;
+  for (uint32_t i = 0; i < AFX_SAMPLE_HANDLE_CAPACITY; i++) {
+    if (!g_sample_slots[i].in_use) {
+      slot_idx = i;
+      break;
+    }
+  }
+  if (slot_idx == AFX_SAMPLE_HANDLE_CAPACITY)
+    return 0;
+
+  uint32_t sample_size = (uint32_t)len;
+  uint32_t spu_addr = afx_mem_alloc(sample_size, 32u);
+  if (spu_addr == 0)
+    return 0;
+  if (!afx_mem_write(spu_addr, buf, sample_size)) {
+    (void)afx_mem_free(spu_addr, sample_size);
+    return 0;
+  }
+
+  afx_sample_slot_t *slot = &g_sample_slots[slot_idx];
+  if (slot->generation == 0)
+    slot->generation = 1;
+  slot->in_use = true;
+  slot->info.spu_addr = spu_addr;
+  slot->info.length = sample_size;
+  slot->info.rate = rate;
+  slot->info.bitsize = bitsize;
+  slot->info.channels = channels;
+
+  return make_sample_handle(slot_idx);
+
+  // volatile afx_driver_state_t *driver =
+  //     (volatile afx_driver_state_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
+  //     AFX_DRIVER_STATE_ADDR);
+}
+
+
+uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size) {
+  if (!afx_data || afx_size == 0)
+    return 0;
+  if (g_afx_alloc_count >= AFX_AFX_ALLOC_CAPACITY)
+    return 0;
+  uint32_t spu_addr = afx_mem_alloc(afx_size, 32);
+  if (spu_addr == 0)
+    return 0;
+  if (!afx_mem_write(spu_addr, afx_data, afx_size)) {
+    (void)afx_mem_free(spu_addr, afx_size);
+    return 0;
+  }
+  g_afx_allocs[g_afx_alloc_count].addr = spu_addr;
+  g_afx_allocs[g_afx_alloc_count].size = afx_size;
+  g_afx_alloc_count++;
+  return spu_addr;
+}
+
+bool afx_free_afx(uint32_t spu_addr) {
+  for (uint32_t i = 0; i < g_afx_alloc_count; i++) {
+    if (g_afx_allocs[i].addr == spu_addr) {
+      uint32_t size = g_afx_allocs[i].size;
+      for (uint32_t j = i; j + 1u < g_afx_alloc_count; j++) {
+        g_afx_allocs[j] = g_afx_allocs[j + 1u];
+      }
+      g_afx_alloc_count--;
+      return afx_mem_free(spu_addr, size);
+    }
+  }
+  return false;
 }

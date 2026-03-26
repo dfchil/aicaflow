@@ -47,7 +47,7 @@ bool afx_sample_get_info(uint32_t sample_handle, afx_sample_info_t *out_info);
 bool afx_init(void);
 
 /* Flow-based playback API */
-uint8_t afx_flow_init(uint32_t song_spu_addr); /* 0xFF on failure */
+uint8_t afx_flow_activate(uint32_t song_spu_addr); /* 0xFF on failure */
 bool afx_flow_set_tl_scale_lut(uint8_t flow_slot, uint32_t lut_spu_addr);
 void afx_flow_play(uint8_t flow_slot);
 void afx_flow_pause(uint8_t flow_slot);
@@ -55,11 +55,6 @@ void afx_flow_resume(uint8_t flow_slot);
 void afx_flow_stop(uint8_t flow_slot);
 void afx_flow_seek(uint8_t flow_slot, uint32_t tick_ms);
 bool afx_flow_poll_completed(uint8_t *flow_slot);
-
-
-// /* Flow slot helpers */
-// uint32_t flow_slot_to_addr(uint8_t slot);
-// uint8_t flow_addr_to_slot(uint32_t flow_addr);
 
 
 static inline uint32_t afx_cmd_lower_bound_by_offset(const uint8_t *stream,
@@ -87,30 +82,34 @@ static inline uint32_t afx_cmd_lower_bound_by_offset(const uint8_t *stream,
 }
 
 /**
- * Set the channel map entry for the given slot index. Each entry is 5 bits,
- * packed into a byte array. Setting a value will be masked to the valid bit
- * range. Does nothing if the slot index is out of bounds.
+ * Set the channel map entry for the given flow_chnl index. Each entry is 5 bits,
+ * packed into a byte array. Setting a hw_chnl will be masked to the valid bit
+ * range. Does nothing if the flow_chnl index is out of bounds.
+ * 
+ * @param channel_map Pointer to the channel map array to modify.
+ * @param flow_chnl The flow channel index to set (0-63).
+ * @param hw_chnl The hardware channel index to map to (0-63).
+ * 
  */
-static inline void afx_channel_map_set(volatile afx_flow_state_t *flow,
-                                       uint32_t slot, uint32_t value) {
-  if (!flow || slot >= AFX_FLOW_CHANNEL_MAP_ENTRIES)
+static inline void afx_channel_map_set(uint8_t channel_map[], uint32_t flow_chnl, uint32_t hw_chnl) {
+  if (!channel_map || flow_chnl >= AFX_FLOW_CHANNEL_MAP_ENTRIES)
     return;
 
-  uint32_t encoded = value & ((1u << AFX_FLOW_CHANNEL_MAP_BITS_PER_ENTRY) - 1u);
-  uint32_t bit_index = (slot << 2) + slot;
+  uint32_t encoded = hw_chnl & ((1u << AFX_FLOW_CHANNEL_MAP_BITS_PER_ENTRY) - 1u);
+  uint32_t bit_index = (flow_chnl << 2) + (flow_chnl << 1); // flow_chnl * bits_per_entry
   uint32_t byte_index = bit_index >> 3;
   uint32_t bit_offset = bit_index & 7u;
 
   uint64_t raw = 0;
-  raw |= (uint64_t)flow->channel_map[byte_index];
-  raw |= (uint64_t)flow->channel_map[byte_index + 1] << 8;
+  raw |= (uint64_t)channel_map[byte_index];
+  raw |= (uint64_t)channel_map[byte_index + 1] << 8;
 
   uint64_t clear_mask =
       ~(((uint64_t)((1u << AFX_FLOW_CHANNEL_MAP_BITS_PER_ENTRY) - 1u))
         << bit_offset);
   raw = (raw & clear_mask) | ((uint64_t)encoded << bit_offset);
-  flow->channel_map[byte_index] = (uint8_t)(raw & 0xFFu);
-  flow->channel_map[byte_index + 1] = (uint8_t)((raw >> 8) & 0xFFu);
+  channel_map[byte_index] = (uint8_t)(raw & 0xFFu);
+  channel_map[byte_index + 1] = (uint8_t)((raw >> 8) & 0xFFu);
 }
 
 

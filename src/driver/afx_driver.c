@@ -20,12 +20,11 @@
 #define drv_state_ptr ((volatile afx_driver_state_t *)AFX_DRIVER_STATE_ADDR)
 
 static inline void driver_init(void) {
-    drv_state_ptr->flags.arm_status = 0;
+    drv_state_ptr->arm_status = 0;
 
     drv_state_ptr->flow_count_active = 0;
-    drv_state_ptr->flow_count_retired = 0;
     for (uint32_t i = 0; i < AFX_FLOW_POOL_CAPACITY; i++) {
-        drv_state_ptr->flow_entries[i].flags.status = AFX_FLOW_AVAILABLE;
+        drv_state_ptr->flow_states[i].status = AFX_FLOW_AVAILABLE;
     }
 
     drv_state_ptr->stack_canary = 0xDEADB12D;
@@ -92,7 +91,7 @@ static inline void cmd2chnl(volatile afx_flow_state_t *flow, const afx_cmd_t *cm
     uint16_t patched_sa_hi = 0;
     uint16_t patched_sa_lo = 0;
     uint32_t have_patched_sa = 0u;
-    if (!flow->flags.sample_addr_mode) {
+    if (!flow->sample_addr_mode) {
         have_patched_sa =
             patch_relative_sample_addr_words(flow, cmd, &patched_sa_hi, &patched_sa_lo);
     }
@@ -121,7 +120,7 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow, uin
     
     while (offset < flow_sect->size) {
         const afx_cmd_t *cmd = (const afx_cmd_t *)(uintptr_t)(flow->flow_ptr + offset);
-        if (cmd->timestamp + flow->tick_offset > tick) {
+        if (cmd->timestamp + flow->tick_adjust > tick) {
             flow->next_event_tick = cmd->timestamp;
             break;
         }
@@ -147,33 +146,33 @@ void arm_main(void) {
         }
 
         if (drv_state_ptr->stack_canary != 0xDEADB12D) {
-            drv_state_ptr->flags.arm_status = 3;
+            drv_state_ptr->arm_status = 3;
             break;
         }
         uint32_t active = 0;
         uint8_t i = 0;
 
         while (i < drv_state_ptr->flow_count_active) {
-            volatile afx_flow_state_t *flow = drv_state_ptr->flow_entries + i;
+            volatile afx_flow_state_t *flow = drv_state_ptr->flow_states + i;
             if (!flow) {
                 i++;
                 continue;
             }
-            if (flow->flags.status == AFX_FLOW_PLAYING) {
+            if (flow->status == AFX_FLOW_PLAYING) {
                 active = 1;
                 flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
                 const afx_section_entry_t *flow_sect = find_afx_section((const afx_header_t *)(flow->afx_base), AFX_SECT_FLOW);
                 if (flow->flow_offset > flow_sect->size) {
-                    flow->flags.status = AFX_FLOW_RETIRED;
+                    flow->status = AFX_FLOW_RETIRED;
                 }
                 if (((afx_header_t*)flow->afx_base)->total_ticks > 0 && flow->next_event_tick >= ((afx_header_t*)flow->afx_base)->total_ticks) {
-                    flow->flags.status = AFX_FLOW_RETIRED;
+                    flow->status = AFX_FLOW_RETIRED;
                 }
                 i++;
             } else {
                 i++;
             }
         }
-        drv_state_ptr->flags.arm_status = active ? 1u : 0u;
+        drv_state_ptr->arm_status = active ? 1u : 0u;
     }
 }
