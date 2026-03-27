@@ -14,6 +14,8 @@
 #define AICA_HW_CLOCK ((volatile uint32_t *)AICA_CLOCK_ADDR)
 #define AICA_PREV_HW_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 4))
 #define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 8))
+#define AICA_CMD_COUNT ((volatile uint32_t *)(AICA_CLOCK_ADDR + 12))
+
 
 #define AICA_SGLT_LO ((volatile uint32_t *)AICA_SGLT_LO_ADDR)
 #define AICA_SGLT_HI ((volatile uint32_t *)AICA_SGLT_HI_ADDR)
@@ -93,6 +95,7 @@ static inline void cmd2chnl(volatile afx_flow_state_t *flow,
     }
     *(volatile uint32_t *)(base_ptr + (current_reg << 2)) = (uint32_t)reg_value;
   }
+  (*AICA_CMD_COUNT)++;
 }
 
 static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
@@ -156,6 +159,7 @@ void arm_main(void) {
   drv_state_ptr->stack_canary = 0xDEADB12D;
   *AICA_PREV_HW_CLOCK = *AICA_HW_CLOCK;
   *AICA_VIRTUAL_CLOCK = 0;
+  *AICA_CMD_COUNT = 0;
 
 
   while (1) {
@@ -180,9 +184,13 @@ void arm_main(void) {
       }
       if (flow->status == AFX_FLOW_PLAYING) {
         active = 1;
-        flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
-        const afx_section_entry_t *flow_sect = find_afx_section(
-            (const afx_header_t *)(flow->afx_base), AFX_SECT_FLOW);
+        if (flow->next_event_tick <= *AICA_VIRTUAL_CLOCK) {
+          flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
+        } else {
+          i++;
+        }
+        // const afx_section_entry_t *flow_sect = find_afx_section(
+        //     (const afx_header_t *)(flow->afx_base), AFX_SECT_FLOW);
         // if (flow->flow_offset > flow_sect->size) {
         //   flow->status = AFX_FLOW_RETIRED;
         // }

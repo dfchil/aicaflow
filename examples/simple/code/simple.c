@@ -96,13 +96,12 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
     return 0;
   }
 
-  uint8_t pcms = (info.bitsize == 16) ? 0 : (info.bitsize == 8) ? 1 : 2;
-  uint32_t n = (info.bitsize == 16)  ? info.length / 2
+  uint32_t num_samples = (info.bitsize == 16)  ? info.length / 2
                : (info.bitsize == 8) ? info.length
                                      : info.length * 2;
   if (info.channels > 1)
-    n /= info.channels;
-  uint32_t duration_ms = n ? (n * 1000u) / info.rate + 1u : 1000u;
+    num_samples /= info.channels;
+  uint32_t duration_ms = num_samples ? (num_samples * 1000u) / info.rate + 1u : 1000u;
 
   uint8_t dipan = (uint8_t)((uint32_t)pan * 0x1Fu / 255u);
 
@@ -135,25 +134,26 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   afx_section_entry_t *sects =
       (afx_section_entry_t *)(blob + sizeof(afx_header_t));
 
-  uint32_t flow_off = sizeof(afx_header_t) + 2 * sizeof(afx_section_entry_t);
+  /* only one flow section in this file format, so offset past one entry */
+  uint32_t flow_off = sizeof(afx_header_t) + 1 * sizeof(afx_section_entry_t);
   uint8_t *cursor = blob + flow_off;
-
+  
   afx_cmd_t *cmd0 = (afx_cmd_t *)cursor;
   cmd0->timestamp = 0;
   cmd0->slot = 0;
   cmd0->offset = reg_play_ctrl;
   cmd0->length = startup_reg_count;
-
+  
   aica_chnl_packed_t *chncfg = (aica_chnl_packed_t *)cmd0->values;
   chncfg->play_ctrl.bits.key_on_ex = 1u;
   chncfg->play_ctrl.bits.key_on = 1u;
   chncfg->play_ctrl.bits.sa_high = (uint16_t)((info.spu_addr >> 16) & 0x7Fu);
-  chncfg->play_ctrl.bits.pcms = pcms;
+  chncfg->play_ctrl.bits.pcms = (info.bitsize == 16) ? 0 : (info.bitsize == 8) ? 1 : 2;
   chncfg->play_ctrl.bits.lpctl = 0u;
   chncfg->play_ctrl.bits.ssctl = 0u;
   chncfg->sa_low = (uint16_t)(info.spu_addr & 0xFFFFu);
   chncfg->lsa = 0u;
-  chncfg->lea = 0u;
+  chncfg->lea = num_samples > (1<<16) - 1 ? (1<<16) - 1 : (uint16_t)num_samples;
   chncfg->env_ad.bits.ar = 31u;
   chncfg->env_ad.bits.d1r = 0u;
   chncfg->env_ad.bits.d2r = 0u;
@@ -161,10 +161,10 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   chncfg->env_dr.bits.dl = 0u;
   chncfg->env_dr.bits.krs = 0u;
   chncfg->env_dr.bits.lpslnk = 0u;
-  chncfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
+    chncfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
   chncfg->env_fm.bits.tl = 0u;
   chncfg->pan.bits.dipan = dipan;
-  chncfg->pan.bits.disdl = 7u;
+  chncfg->pan.bits.disdl = 0xFu;
 
   printf("[SFX] regs slot=%u pcms=%u sa_hi=%u sa_lo=0x%04x fns_oct=0x%04x "
          "tl=%u disdl=%u\n",
@@ -175,13 +175,28 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   cursor += sizeof(uint32_t) + sizeof(uint16_t) +
             (size_t)cmd0->length * sizeof(uint16_t);
 
+  /* Terminating key-off command at end of sample time */
+  afx_cmd_t *cmd1 = (afx_cmd_t *)cursor;
+  cmd1->timestamp = duration_ms;
+  cmd1->slot = 0;
+  cmd1->offset = reg_play_ctrl;
+  cmd1->length = 1;
+
+  aica_chnl_packed_t *keyoff = (aica_chnl_packed_t *)cmd1->values;
+  keyoff->play_ctrl.raw = 0;
+  keyoff->play_ctrl.bits.key_on = 0;
+  keyoff->play_ctrl.bits.key_on_ex = 1; // release note
+
+  cursor += sizeof(uint32_t) + sizeof(uint16_t) +
+            (size_t)cmd1->length * sizeof(uint16_t);
+
   uint32_t flow_size = (uint32_t)(cursor - (blob + flow_off));
 
   /* Patch section table */
   sects[0].id = AFX_SECT_FLOW;
   sects[0].offset = flow_off;
   sects[0].size = flow_size;
-  sects[0].count = 1u;
+  sects[0].count = 2u;
   sects[0].align = 4u;
 
   uint32_t flow_spu_addr = afx_upload_afx(blob, (uint32_t)(cursor - blob));
@@ -209,16 +224,12 @@ static void play_sfx(void *data) {
         printf("[SFX] play failed: flow create returned 0\n");
         return;
       }
-      afx_driver_state_info(drv_state_ptr, "after upload");
     }
 
-    afx_driver_state_info(drv_state_ptr, "before activate");
     uint8_t slot = afx_flow_activate(state->flows[state->cursor_pos]);
-    afx_driver_state_info(drv_state_ptr, "after activate");
 
     printf("[SFX] flow activate returned slot %u\n", drv_state_ptr->flow_count_active > 0 ? slot : 0xFFu);
 
-    afx_driver_state_info(drv_state_ptr, "before play");
     afx_flow_play(slot);
     afx_driver_state_info(drv_state_ptr, "after play");
   } else {
@@ -330,6 +341,9 @@ void main_mode_updater(void *data) {
 }
 
 int main(__unused int argc, __unused char **argv) {
+
+  printf(offsetof(afx_driver_state_t, flow_states) == 260u ? "Driver state ABI check passed\n" : "Driver state ABI check failed, rv %zu\n", offsetof(afx_driver_state_t, flow_states));
+
   enj_state_init_defaults();
   if (enj_state_startup() != 0) {
     ENJ_DEBUG_PRINT("enDjinn startup failed, exiting\n");

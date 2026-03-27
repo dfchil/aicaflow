@@ -20,6 +20,7 @@
 #define AICA_HW_CLOCK      ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR))
 #define AICA_PREV_HW_CLOCK ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 4))
 #define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 8))
+#define AICA_CMD_COUNT ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 12))
 
 
 #define AICA_DSP_COEF_ADDR 0x00801000u
@@ -217,10 +218,12 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
   uint32_t hw_clock = *AICA_HW_CLOCK;
   uint32_t prev_hw_clock = *AICA_PREV_HW_CLOCK;
   uint32_t virtual_clock = *AICA_VIRTUAL_CLOCK;
+  uint32_t cmd_count = *AICA_CMD_COUNT;
 
   printf("[AFX] driver state @%s %p\n", label ? label : "", (const void *)driver_state);
   printf("[AFX]  stack_canary = 0x%08X\n", (unsigned)driver_state->stack_canary);
   printf("[AFX]  flow_count_active = %u\n", (unsigned)driver_state->flow_count_active);
+  printf("[AFX]  AICA_CMD_COUNT = %u\n", (unsigned)cmd_count);
   printf("[AFX]  arm_status = %u\n", (unsigned)driver_state->arm_status);
   printf("[AFX]  HW clock = %u, prev = %u, virtual = %u\n", hw_clock, prev_hw_clock, virtual_clock);
 
@@ -236,11 +239,13 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
     uint32_t tick_progress = 0;
     uint32_t flow_progress = 0;
 
+    uint32_t required_channels = 0;
     if (f->afx_base != 0) {
       const afx_header_t *hdr =
           (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + f->afx_base);
       const afx_section_entry_t *flow_sect = find_afx_section(hdr, AFX_SECT_FLOW);
       if (hdr && flow_sect) {
+        required_channels = hdr->required_channels;
         total_ticks = hdr->total_ticks;
         flow_section_size = flow_sect->size;
         if (total_ticks > 0) {
@@ -252,7 +257,30 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
       }
     }
 
-    printf("[AFX]  flow_slot %02u: status=%s (raw=%u), afx_base=0x%08X, flow_ptr=0x%08X, flow_offset=%u/%u (%u%%), tick_adjust=%u, next_event_tick=%u/%u (%u%%), tl_lut=0x%08X, sample_addr_mode=%u\n",
+    char channel_map_str[256];
+    channel_map_str[0] = '\0';
+    size_t cm_len = 0;
+    cm_len += snprintf(channel_map_str + cm_len,
+                       sizeof(channel_map_str) - cm_len,
+                       "[");
+    for (uint32_t ch = 0; ch < required_channels; ch++) {
+      uint32_t hw = afx_channel_map_get(f, ch);
+      if (hw != AFX_FLOW_CHANNEL_MAP_INVALID) {
+        cm_len += snprintf(channel_map_str + cm_len,
+                           sizeof(channel_map_str) - cm_len,
+                           "%s%u->%u", cm_len > 1 ? "," : "", (unsigned)ch,
+                           (unsigned)hw);
+        if (cm_len >= sizeof(channel_map_str) - 1) break;
+      }
+    }
+    if (cm_len < sizeof(channel_map_str) - 1)
+      snprintf(channel_map_str + cm_len,
+               sizeof(channel_map_str) - cm_len,
+               "]");
+    else
+      channel_map_str[sizeof(channel_map_str) - 1] = '\0';
+
+    printf("[AFX]  flow_slot %02u: status=%s (raw=%u), afx_base=0x%08X, flow_ptr=0x%08X, flow_offset=%u/%u (%u%%), tick_adjust=%u, next_event_tick=%u/%u (%u%%), tl_lut=0x%08X, sample_addr_mode=%u, map=%s\n",
            (unsigned)i,
            status,
            (unsigned)f->status,
@@ -266,7 +294,9 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
            (unsigned)total_ticks,
            (unsigned)tick_progress,
            (unsigned)f->tl_scale_lut_ptr,
-           (unsigned)f->sample_addr_mode);
+           (unsigned)f->sample_addr_mode,
+            channel_map_str
+          );
   }
 }
 

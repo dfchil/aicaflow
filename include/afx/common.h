@@ -68,8 +68,6 @@
 #define AICAF_CMD_RETIRE_FLOW \
   7 /* arg0 = flow state SPU addr (flow self-retires at end) */
 
-#pragma pack(push, 1)
-
 /* .afx file header */
 typedef struct {
   uint32_t magic;       /* AICAF_MAGIC */
@@ -82,7 +80,7 @@ typedef struct {
   uint16_t flags;        /* Reserved */
 } afx_header_t;
 
-// _Static_assert(sizeof(afx_header_t) == 20u, "afx_header_t size mismatch");
+_Static_assert(sizeof(afx_header_t) == 16u, "afx_header_t size mismatch");
 
 /* Section table entry */
 typedef struct {
@@ -110,7 +108,8 @@ typedef struct {
   uint32_t sample_rate; /* original sample rate in Hz */
 } afx_sample_desc_t;
 
-/* Flow command (8 bytes) */
+#pragma pack(push, 1)
+/* Flow command (6 bytes + payload) */
 typedef struct {
   uint32_t timestamp; /* Absolute time in ms */
   struct {
@@ -120,6 +119,7 @@ typedef struct {
   };
   uint16_t values[];
 } afx_cmd_t;
+_Static_assert(sizeof(afx_cmd_t) == 6u, "afx_cmd_t must be 6 bytes header");
 
 /* IPC Command (16 bytes) */
 typedef struct {

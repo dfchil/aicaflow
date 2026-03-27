@@ -35,9 +35,9 @@ typedef struct afx_flow_state {
     uint32_t status : 3;      /* AFX_FLOW_STOPPED/PLAYING/PAUSED/DRAINING */
     uint32_t reserved : 28;
   }; /* Reserved for future use */
+  uint32_t padding[5]; /* Pad to 96 bytes for easy clearing with 32-bit writes */
   uint8_t channel_map[AFX_FLOW_CHANNEL_MAP_BYTE_SIZE]; /* 64 entries of 6 bits
                                                            each 48 byes*/
-  uint32_t padding[5]; /* Pad to 96 bytes for easy clearing with 32-bit writes */
 } afx_flow_state_t;
 
 _Static_assert(sizeof(afx_flow_state_t) == 96u, "afx_flow_state_t != 96 bytes");
@@ -46,10 +46,6 @@ _Static_assert((AFX_FLOW_POOL_CAPACITY * sizeof(afx_flow_state_t)) <= 8192u,
 
 /* Global Driver State (runtime + stack canary). */
 typedef struct {
-  afx_flow_state_t
-      flow_states[AFX_FLOW_POOL_CAPACITY]; /* Active flow states stored
-                                               directly in driver state for
-                                              easy access by ARM7 */
   uint32_t stack_canary;   /* Stack overflow detection (0xDEADB12D) */
   uint32_t mini_stack[64]; /* Small execution stack */
   struct {
@@ -57,6 +53,10 @@ typedef struct {
     uint32_t arm_status : 2;        /* 0=Idle, 1=Playing, 3=Error */
     uint32_t reserved : 24;
   };
+  afx_flow_state_t
+      flow_states[AFX_FLOW_POOL_CAPACITY]; /* Active flow states stored
+                                               directly in driver state for
+                                              easy access by ARM7 */
 } afx_driver_state_t;
 
 #pragma pack(pop)

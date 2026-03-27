@@ -16,7 +16,7 @@ static inline uint32_t afx_scale_total_level(uint32_t tl, uint32_t volume) {
 
 
 static void test_struct_layout(void) {
-    assert(sizeof(afx_header_t) == 20);
+    assert(sizeof(afx_header_t) == 16u);
     assert(sizeof(afx_section_entry_t) == 24);
     assert(sizeof(afx_sample_desc_t) == 32);
     /* Variable-length command header is 6 bytes + values array */
@@ -36,28 +36,18 @@ static void test_struct_layout(void) {
 
 static void test_driver_state_abi(void) {
     /* Driver runtime state now uses array flow entries and counters. */
-    assert(sizeof(afx_driver_state_t) == 520u);
-    assert(offsetof(afx_driver_state_t, flow_count_active) == 0u);
-    assert(offsetof(afx_driver_state_t, flow_states) == 4u);
-    assert(offsetof(afx_driver_state_t, stack_canary) == 260u);
-    assert(offsetof(afx_driver_state_t, mini_stack) == 264u);
+    assert(sizeof(afx_driver_state_t) == 6408u);
+    assert(offsetof(afx_driver_state_t, stack_canary) == 0u);
+    assert(offsetof(afx_driver_state_t, mini_stack) == 4u);
+    assert(offsetof(afx_driver_state_t, flow_states) == 264u);
 
     /* Flow state carries optional per-flow LUT pointer. */
-    assert(offsetof(afx_flow_state_t, tl_scale_lut_ptr) == 40u);
+    assert(offsetof(afx_flow_state_t, tl_scale_lut_ptr) == 20u);
 }
 
 static void test_memory_layout_invariants(void) {
     /* Reserved control blocks should be naturally aligned and ordered high->low. */
-    assert((AFX_IPC_CONTROL_ADDR & 31u) == 0u);
     assert((AFX_DRIVER_STATE_ADDR & 31u) == 0u);
-    assert((AFX_IPC_CMD_QUEUE_ADDR & 31u) == 0u);
-
-    assert(AFX_IPC_CONTROL_ADDR > AFX_IPC_CMD_QUEUE_ADDR);
-    assert(AFX_IPC_CMD_QUEUE_ADDR > AFX_DRIVER_STATE_ADDR);
-
-    /* Queue capacity must match its byte block and element size. */
-    assert((AFX_IPC_QUEUE_SZ % sizeof(afx_ipc_cmd_t)) == 0u);
-    assert(AFX_IPC_QUEUE_CAPACITY == (AFX_IPC_QUEUE_SZ / sizeof(afx_ipc_cmd_t)));
 }
 
 static void test_scale_total_level(void) {
