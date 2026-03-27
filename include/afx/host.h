@@ -56,6 +56,7 @@ void afx_flow_stop(uint8_t flow_slot);
 void afx_flow_seek(uint8_t flow_slot, uint32_t tick_ms);
 bool afx_flow_poll_completed(uint8_t *flow_slot);
 
+void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, const char* label);
 
 static inline uint32_t afx_cmd_lower_bound_by_offset(const uint8_t *stream,
                                                      uint32_t size,

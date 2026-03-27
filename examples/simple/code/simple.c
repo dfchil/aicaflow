@@ -197,7 +197,9 @@ static void play_sfx(void *data) {
   printf("[SFX] trigger: idx=%d pan=%u handle=%d\n", state->cursor_pos,
          state->pan, state->sounds[state->cursor_pos]);
   if (state->sounds[state->cursor_pos] != -1) {
+
     if (!state->flows[state->cursor_pos]) {
+      afx_driver_state_info(drv_state_ptr, "before upload");
       uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos],
                                      state->pan);
       if (flow) {
@@ -207,13 +209,18 @@ static void play_sfx(void *data) {
         printf("[SFX] play failed: flow create returned 0\n");
         return;
       }
+      afx_driver_state_info(drv_state_ptr, "after upload");
     }
-    printf("current tick: %u\n", *AICA_VIRTUAL_CLOCK);
 
+    afx_driver_state_info(drv_state_ptr, "before activate");
     uint8_t slot = afx_flow_activate(state->flows[state->cursor_pos]);
+    afx_driver_state_info(drv_state_ptr, "after activate");
+
     printf("[SFX] flow activate returned slot %u\n", drv_state_ptr->flow_count_active > 0 ? slot : 0xFFu);
 
+    afx_driver_state_info(drv_state_ptr, "before play");
     afx_flow_play(slot);
+    afx_driver_state_info(drv_state_ptr, "after play");
   } else {
     printf("[SFX] trigger ignored: invalid sample handle\n");
   }
@@ -329,10 +336,12 @@ int main(__unused int argc, __unused char **argv) {
     return -1;
   }
 
+  
   if (init_afx_driver() != 0) {
     ENJ_DEBUG_PRINT("AFX driver init failed, exiting\n");
     return -1;
   }
+  afx_driver_state_info(drv_state_ptr, "after init");
 
   SPE_state_t rat_state = {
       .cursor_pos = 0,
@@ -354,8 +363,6 @@ int main(__unused int argc, __unused char **argv) {
       .data = &rat_state,
   };
   enj_mode_push(&main_mode);
-  printf("sizeof afx_flow_state_t: %lu\n", (unsigned long)sizeof(afx_flow_state_t));
-
   enj_state_run();
 
   for (int i = 0;
