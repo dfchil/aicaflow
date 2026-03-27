@@ -16,7 +16,6 @@
 #define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 8))
 #define AICA_CMD_COUNT ((volatile uint32_t *)(AICA_CLOCK_ADDR + 12))
 
-
 #define AICA_SGLT_LO ((volatile uint32_t *)AICA_SGLT_LO_ADDR)
 #define AICA_SGLT_HI ((volatile uint32_t *)AICA_SGLT_HI_ADDR)
 
@@ -68,8 +67,9 @@ patch_relative_sample_addr_words(const volatile afx_flow_state_t *flow,
 
 static inline void cmd2chnl(volatile afx_flow_state_t *flow,
                             const afx_cmd_t *cmd) {
-  uint32_t base_ptr =
-      AICA_REG_BASE + (afx_channel_map_get(flow, (uint32_t)cmd->slot) << 7);
+  uint32_t hw_slot = afx_channel_map_get(flow, (uint32_t)cmd->slot);
+  uint32_t base_ptr = AICA_REG_BASE + (hw_slot << 7);
+  uint32_t reg_idx = cmd->offset;
 
   uint16_t patched_sa_hi = 0;
   uint16_t patched_sa_lo = 0;
@@ -79,8 +79,14 @@ static inline void cmd2chnl(volatile afx_flow_state_t *flow,
         flow, cmd, &patched_sa_hi, &patched_sa_lo);
   }
 
-  for (uint32_t i = 0; i < cmd->length; i++) {
-    uint32_t current_reg = cmd->offset + i;
+  uint32_t has_play_ctrl = cmd->offset == AICA_REG_SA_HI
+                               ? 1
+                               : 0; // If SA_HI is being written, we'll write
+                                    // play_ctrl last after patching
+
+  for (uint32_t i = has_play_ctrl; i < cmd->length; i++) {
+    uint32_t current_reg = reg_idx + i;
+    uint32_t reg_addr = base_ptr + (current_reg << 2);
     uint16_t reg_value = cmd->values[i];
 
     if (have_patched_sa) {
@@ -90,11 +96,16 @@ static inline void cmd2chnl(volatile afx_flow_state_t *flow,
         reg_value = patched_sa_lo;
       }
     }
+
     if (current_reg == AICA_REG_TOT_LVL && flow->tl_scale_lut_ptr) {
       reg_value = apply_flow_tl_lut(flow, reg_value);
     }
-    *(volatile uint32_t *)(base_ptr + (current_reg << 2)) = (uint32_t)reg_value;
+    *(volatile uint16_t *)reg_addr = reg_value;
   }
+  if (has_play_ctrl) {
+    *(volatile uint16_t *)(base_ptr) = cmd->values[0];
+  }
+
   (*AICA_CMD_COUNT)++;
 }
 
@@ -102,8 +113,7 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
                                             uint32_t tick) {
   uint32_t offset = flow->flow_offset;
   const afx_header_t *hdr = (const afx_header_t *)(flow->afx_base);
-  const afx_section_entry_t *flow_sect =
-      find_afx_section(hdr, AFX_SECT_FLOW);
+  const afx_section_entry_t *flow_sect = find_afx_section(hdr, AFX_SECT_FLOW);
 
   uint32_t next_event_rel = 0;
   while (offset < flow_sect->size) {
@@ -161,7 +171,6 @@ void arm_main(void) {
   *AICA_VIRTUAL_CLOCK = 0;
   *AICA_CMD_COUNT = 0;
 
-
   while (1) {
     uint32_t hw_delta = *AICA_HW_CLOCK - *AICA_PREV_HW_CLOCK;
     if (hw_delta > 0) {
@@ -184,16 +193,10 @@ void arm_main(void) {
       }
       if (flow->status == AFX_FLOW_PLAYING) {
         active = 1;
-        if (flow->next_event_tick <= *AICA_VIRTUAL_CLOCK) {
+        if (flow->next_event_tick + flow->tick_adjust <= *AICA_VIRTUAL_CLOCK) {
           flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
-        } else {
-          i++;
         }
-        // const afx_section_entry_t *flow_sect = find_afx_section(
-        //     (const afx_header_t *)(flow->afx_base), AFX_SECT_FLOW);
-        // if (flow->flow_offset > flow_sect->size) {
-        //   flow->status = AFX_FLOW_RETIRED;
-        // }
+
         if (((afx_header_t *)flow->afx_base)->total_ticks > 0 &&
             (*AICA_VIRTUAL_CLOCK) - flow->tick_adjust >=
                 ((afx_header_t *)flow->afx_base)->total_ticks) {

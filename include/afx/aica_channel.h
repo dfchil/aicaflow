@@ -75,19 +75,19 @@ typedef struct {
    * AICA wave memory is 2 MB; addresses must be within this range.
    * Used to fetch sample data for playback and looping.
    */
-  uint16_t sa_low : 16;
+  uint16_t sa_low;
   /** Loop Start Address (0x08)
    * Offset (in samples) from sample start address.
    * Actual address: sa + (lsa * sample size in bytes).
    * Used for seamless looping when lpctl=1.
    */
-  uint16_t lsa : 16;
+  uint16_t lsa;
   /** Loop End Address (0x0C)
    * Offset (in samples) from sample start address.
    * Actual address: sa + (lea * sample size in bytes).
    * @note If looping (lpctl=1), playback jumps back to lsa at this point.
    */
-  uint16_t lea : 16;
+  uint16_t lea;
   union {
     uint16_t raw;
     struct {
@@ -273,7 +273,7 @@ typedef struct {
   union {
     uint16_t raw;
     struct {
-      uint16_t reserved1 : 1;
+      uint16_t reserved1 : 2;
       /* Specifies the mix register address for each slot when direct data is
          output to DAC. The AICA can route the output of each slot directly to
          the DAC for monitoring or special effects, bypassing the DSP's mix
@@ -295,7 +295,7 @@ typedef struct {
        * balancing the mix and achieving the desired dynamics in the sound.
        */
       uint16_t tl : 8;
-      uint16_t reserved2 : 1;
+      uint16_t reserved2 : 2;
     } bits;
   } env_fm; // 0x20 - Envelope FM Control. Can modulate the EG rates and levels
             // of other channels.

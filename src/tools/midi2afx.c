@@ -830,7 +830,7 @@ int main(int argc, char **argv) {
                         sort_buffer[flow_op_count++] = (sort_op_t){ current_ms, flow_op_count, op_start, flow_stream_size - op_start };
 
                         op_start = flow_stream_size;
-                        write_single_cmd(current_ms, slot, AICA_REG_FNS_OCT, (uint16_t)aica_pitch_convert(ratio),
+                        write_single_cmd(current_ms, slot, AICA_REG_PITCH, (uint16_t)aica_pitch_convert(ratio),
                                          flow_stream_buffer, &flow_stream_size);
                         sort_buffer[flow_op_count++] = (sort_op_t){ current_ms, flow_op_count, op_start, flow_stream_size - op_start };
 

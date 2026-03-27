@@ -69,13 +69,12 @@ typedef struct {
 #define AICA_REG_SA_LO 0x01
 #define AICA_REG_LSA 0x02
 #define AICA_REG_LEA 0x03
-#define AICA_REG_D2R_D1R 0x07
-#define AICA_REG_EGH_RR 0x08
-#define AICA_REG_AR_SR 0x09
-#define AICA_REG_LNK_DL 0x0A
-#define AICA_REG_FNS_OCT 0x0C
-#define AICA_REG_TOT_LVL 0x0D
-#define AICA_REG_PAN_VOL 0x0E
+#define AICA_REG_ENV_AD 0x04
+#define AICA_REG_ENV_DR 0x05
+#define AICA_REG_PITCH 0x06
+#define AICA_REG_LFO 0x07
+#define AICA_REG_TOT_LVL 0x08
+#define AICA_REG_PAN_VOL 0x09
 
 /**
  * Get the channel map entry for the given slot index. Each entry is 6

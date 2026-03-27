@@ -161,7 +161,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   chncfg->env_dr.bits.dl = 0u;
   chncfg->env_dr.bits.krs = 0u;
   chncfg->env_dr.bits.lpslnk = 0u;
-    chncfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
+  chncfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
   chncfg->env_fm.bits.tl = 0u;
   chncfg->pan.bits.dipan = dipan;
   chncfg->pan.bits.disdl = 0xFu;
@@ -172,8 +172,9 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
          chncfg->play_ctrl.bits.sa_high, chncfg->sa_low, chncfg->pitch.raw,
          chncfg->env_fm.bits.tl, chncfg->pan.bits.disdl);
 
-  cursor += sizeof(uint32_t) + sizeof(uint16_t) +
-            (size_t)cmd0->length * sizeof(uint16_t);
+  uint32_t cmd0_size = 6 + (cmd0->length * 2);
+  cmd0_size = (cmd0_size + 3) & ~3;
+  cursor = blob + flow_off + cmd0_size;
 
   /* Terminating key-off command at end of sample time */
   afx_cmd_t *cmd1 = (afx_cmd_t *)cursor;
@@ -187,8 +188,9 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   keyoff->play_ctrl.bits.key_on = 0;
   keyoff->play_ctrl.bits.key_on_ex = 1; // release note
 
-  cursor += sizeof(uint32_t) + sizeof(uint16_t) +
-            (size_t)cmd1->length * sizeof(uint16_t);
+  uint32_t cmd1_size = 6 + (cmd1->length * 2);
+  cmd1_size = (cmd1_size + 3) & ~3;
+  cursor += cmd1_size;
 
   uint32_t flow_size = (uint32_t)(cursor - (blob + flow_off));
 
@@ -341,9 +343,6 @@ void main_mode_updater(void *data) {
 }
 
 int main(__unused int argc, __unused char **argv) {
-
-  printf(offsetof(afx_driver_state_t, flow_states) == 260u ? "Driver state ABI check passed\n" : "Driver state ABI check failed, rv %zu\n", offsetof(afx_driver_state_t, flow_states));
-
   enj_state_init_defaults();
   if (enj_state_startup() != 0) {
     ENJ_DEBUG_PRINT("enDjinn startup failed, exiting\n");
