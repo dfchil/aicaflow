@@ -71,7 +71,7 @@ static inline uint32_t afx_cmd_lower_bound_by_offset(const uint8_t *stream,
     if (cmd->timestamp >= target_tick)
       return curr_ptr;
 
-    uint32_t cmd_num_vals = cmd->length;
+    uint32_t cmd_num_vals = AFX_CMD_GET_LENGTH(cmd);
     uint32_t cmd_size = 6 + (cmd_num_vals << 1);
     // Commands are 4-byte aligned in the stream
     cmd_size = (cmd_size + 3) & ~3;

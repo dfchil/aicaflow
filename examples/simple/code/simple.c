@@ -140,55 +140,58 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
   
   afx_cmd_t *cmd0 = (afx_cmd_t *)cursor;
   cmd0->timestamp = 0;
-  cmd0->slot = 0;
-  cmd0->offset = reg_play_ctrl;
-  cmd0->length = startup_reg_count;
+  AFX_CMD_SET_SLOT(cmd0, 0);
+  AFX_CMD_SET_OFFSET(cmd0, reg_play_ctrl);
+  AFX_CMD_SET_LENGTH(cmd0, startup_reg_count);
   
   aica_chnl_packed_t *chncfg = (aica_chnl_packed_t *)cmd0->values;
-  chncfg->play_ctrl.bits.key_on_ex = 1u;
-  chncfg->play_ctrl.bits.key_on = 1u;
-  chncfg->play_ctrl.bits.sa_high = (uint16_t)((info.spu_addr >> 16) & 0x7Fu);
-  chncfg->play_ctrl.bits.pcms = (info.bitsize == 16) ? 0 : (info.bitsize == 8) ? 1 : 2;
-  chncfg->play_ctrl.bits.lpctl = 0u;
-  chncfg->play_ctrl.bits.ssctl = 0u;
+  
+  uint16_t pcms = (info.bitsize == 16) ? 0 : (info.bitsize == 8) ? 1 : 2;
+  uint16_t sa_high = (uint16_t)((info.spu_addr >> 16) & 0x7Fu);
+  /* packed: sa_high[0:6], pcms[7:8], lpctl[9], ssctl[10], res[11:13], key_on[14], key_on_ex[15] */
+  chncfg->play_ctrl.raw = (sa_high) | (pcms << 7) | (0 << 9) | (0 << 10) | (1 << 14) | (1 << 15);
+
   chncfg->sa_low = (uint16_t)(info.spu_addr & 0xFFFFu);
   chncfg->lsa = 0u;
   chncfg->lea = num_samples > (1<<16) - 1 ? (1<<16) - 1 : (uint16_t)num_samples;
-  chncfg->env_ad.bits.ar = 31u;
-  chncfg->env_ad.bits.d1r = 0u;
-  chncfg->env_ad.bits.d2r = 0u;
-  chncfg->env_dr.bits.rr = 15u;
-  chncfg->env_dr.bits.dl = 0u;
-  chncfg->env_dr.bits.krs = 0u;
-  chncfg->env_dr.bits.lpslnk = 0u;
+
+  /* packed: ar[0:4], res[5], d1r[6:10], d2r[11:15] */
+  chncfg->env_ad.raw = (31u) | (0 << 6) | (0 << 11);
+  
+  /* packed: rr[0:4], dl[5:9], krs[10:13], lpslnk[14] */
+  chncfg->env_dr.raw = (15u) | (0 << 5) | (0 << 10) | (0 << 14);
+
   chncfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
-  chncfg->env_fm.bits.tl = 0u;
-  chncfg->pan.bits.dipan = dipan;
-  chncfg->pan.bits.disdl = 0xFu;
+  
+  /* packed: isel[0:3] (actually isel[0:3]? wait, offset 2-5? No, user had reserved:2, isel:4, tl:8. So: isel[2:5], tl[6:13]) */
+  /* user's bitfield: isel[2:5], tl[6:13]. Wait! user's bitfield: res[0:1], isel[2:5], tl[6:13], res2[14:15] */
+  chncfg->env_fm.raw = (0u << 6); // tl = 0
+
+  /* packed: dipan[0:4], res[5:7], disdl[8:11], imxl[12:15] */
+  chncfg->pan.raw = (dipan) | (0xFu << 8);
 
   printf("[SFX] regs slot=%u pcms=%u sa_hi=%u sa_lo=0x%04x fns_oct=0x%04x "
          "tl=%u disdl=%u\n",
-         cmd0->slot, chncfg->play_ctrl.bits.pcms,
-         chncfg->play_ctrl.bits.sa_high, chncfg->sa_low, chncfg->pitch.raw,
-         chncfg->env_fm.bits.tl, chncfg->pan.bits.disdl);
+         AFX_CMD_GET_SLOT(cmd0), pcms,
+         sa_high, chncfg->sa_low, chncfg->pitch.raw,
+         0, 0xF);
 
-  uint32_t cmd0_size = 6 + (cmd0->length * 2);
+  uint32_t cmd0_size = 6 + (AFX_CMD_GET_LENGTH(cmd0) * 2);
   cmd0_size = (cmd0_size + 3) & ~3;
   cursor = blob + flow_off + cmd0_size;
 
   /* Terminating key-off command at end of sample time */
   afx_cmd_t *cmd1 = (afx_cmd_t *)cursor;
   cmd1->timestamp = duration_ms;
-  cmd1->slot = 0;
-  cmd1->offset = reg_play_ctrl;
-  cmd1->length = 1;
+  AFX_CMD_SET_SLOT(cmd1, 0);
+  AFX_CMD_SET_OFFSET(cmd1, reg_play_ctrl);
+  AFX_CMD_SET_LENGTH(cmd1, 1);
 
   aica_chnl_packed_t *keyoff = (aica_chnl_packed_t *)cmd1->values;
-  keyoff->play_ctrl.raw = 0;
-  keyoff->play_ctrl.bits.key_on = 0;
-  keyoff->play_ctrl.bits.key_on_ex = 1; // release note
+  /* key_on=0, key_on_ex=1 */
+  keyoff->play_ctrl.raw = (1 << 15) | (0 << 14);
 
-  uint32_t cmd1_size = 6 + (cmd1->length * 2);
+  uint32_t cmd1_size = 6 + (AFX_CMD_GET_LENGTH(cmd1) * 2);
   cmd1_size = (cmd1_size + 3) & ~3;
   cursor += cmd1_size;
 
@@ -335,8 +338,8 @@ void main_mode_updater(void *data) {
         ENJ_BUTTON_DOWN_THIS_FRAME) {
       sfx_catalog[state->cursor_pos].on_press_A(data);
     }
-    if (ctrl_states[state->active_controller]->button.X == ENJ_BUTTON_DOWN) {
-      state->pan = (uint8_t)(ctrl_states[state->active_controller]->joyx + 128);
+    if (ctrl_states[state->active_controller]->button.X == ENJ_BUTTON_DOWN_THIS_FRAME) {
+      afx_driver_state_info(drv_state_ptr, "btn X pressed");
     }
   } while (0);
   enj_render_list_add(PVR_LIST_PT_POLY, render, data);

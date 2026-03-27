@@ -112,14 +112,18 @@ typedef struct {
 /* Flow command (6 bytes + payload) */
 typedef struct {
   uint32_t timestamp; /* Absolute time in ms */
-  struct {
-    uint16_t slot : 6;   /* AICA voice slot (0-63) */
-    uint16_t offset : 5; /* 0-16 */
-    uint16_t length : 5; /* 1-17 num writes */
-  };
+  uint16_t pack;
   uint16_t values[];
 } afx_cmd_t;
 _Static_assert(sizeof(afx_cmd_t) == 6u, "afx_cmd_t must be 6 bytes header");
+
+#define AFX_CMD_GET_SLOT(cmd)   ((cmd)->pack & 0x3F)
+#define AFX_CMD_GET_OFFSET(cmd) (((cmd)->pack >> 6) & 0x1F)
+#define AFX_CMD_GET_LENGTH(cmd) (((cmd)->pack >> 11) & 0x1F)
+
+#define AFX_CMD_SET_SLOT(cmd, slot)   (cmd)->pack = ((cmd)->pack & ~0x3F) | ((slot) & 0x3F)
+#define AFX_CMD_SET_OFFSET(cmd, off)  (cmd)->pack = ((cmd)->pack & ~(0x1F << 6)) | (((off) & 0x1F) << 6)
+#define AFX_CMD_SET_LENGTH(cmd, len)  (cmd)->pack = ((cmd)->pack & ~(0x1F << 11)) | (((len) & 0x1F) << 11)
 
 /* IPC Command (16 bytes) */
 typedef struct {

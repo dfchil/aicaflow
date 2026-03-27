@@ -122,7 +122,7 @@ bool afx_init(void) {
   if (!range_fits_dynamic(fw_spu_addr, fw_size + sizeof(uint32_t)))
     return false;
 
-  memcpy((void *)(uintptr_t)(SPU_RAM_BASE_SH4 + fw_spu_addr), fw_data, fw_size);
+  spu_memload(fw_spu_addr, (void*)fw_data, fw_size);
 
   uint32_t dynamic_base = align_up_u32(marker_addr + sizeof(uint32_t), 32);
   if (dynamic_base >= AFX_DRIVER_STATE_ADDR)

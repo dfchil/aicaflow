@@ -39,8 +39,8 @@ patch_relative_sample_addr_words(const volatile afx_flow_state_t *flow,
                                  uint16_t *patched_sa_lo) {
   uint32_t sa_hi_idx = 0xFFFFFFFFu;
   uint32_t sa_lo_idx = 0xFFFFFFFFu;
-  uint32_t start = cmd->offset;
-  uint32_t end = start + cmd->length;
+  uint32_t start = AFX_CMD_GET_OFFSET(cmd);
+  uint32_t end = start + AFX_CMD_GET_LENGTH(cmd);
 
   if (start <= AICA_REG_SA_HI && AICA_REG_SA_HI < end) {
     sa_hi_idx = AICA_REG_SA_HI - start;
@@ -67,9 +67,9 @@ patch_relative_sample_addr_words(const volatile afx_flow_state_t *flow,
 
 static inline void cmd2chnl(volatile afx_flow_state_t *flow,
                             const afx_cmd_t *cmd) {
-  uint32_t hw_slot = afx_channel_map_get(flow, (uint32_t)cmd->slot);
+  uint32_t hw_slot = afx_channel_map_get(flow, (uint32_t)AFX_CMD_GET_SLOT(cmd));
   uint32_t base_ptr = AICA_REG_BASE + (hw_slot << 7);
-  uint32_t reg_idx = cmd->offset;
+  uint32_t reg_idx = AFX_CMD_GET_OFFSET(cmd);
 
   uint16_t patched_sa_hi = 0;
   uint16_t patched_sa_lo = 0;
@@ -79,12 +79,12 @@ static inline void cmd2chnl(volatile afx_flow_state_t *flow,
         flow, cmd, &patched_sa_hi, &patched_sa_lo);
   }
 
-  uint32_t has_play_ctrl = cmd->offset == AICA_REG_SA_HI
+  uint32_t has_play_ctrl = AFX_CMD_GET_OFFSET(cmd) == AICA_REG_SA_HI
                                ? 1
                                : 0; // If SA_HI is being written, we'll write
                                     // play_ctrl last after patching
 
-  for (uint32_t i = has_play_ctrl; i < cmd->length; i++) {
+  for (uint32_t i = has_play_ctrl; i < AFX_CMD_GET_LENGTH(cmd); i++) {
     uint32_t current_reg = reg_idx + i;
     uint32_t reg_addr = base_ptr + (current_reg << 2);
     uint16_t reg_value = cmd->values[i];
@@ -103,7 +103,11 @@ static inline void cmd2chnl(volatile afx_flow_state_t *flow,
     *(volatile uint16_t *)reg_addr = reg_value;
   }
   if (has_play_ctrl) {
-    *(volatile uint16_t *)(base_ptr) = cmd->values[0];
+    if (have_patched_sa) {
+      *(volatile uint16_t *)(base_ptr) = patched_sa_hi;
+    } else {
+      *(volatile uint16_t *)(base_ptr) = cmd->values[0];
+    }
   }
 
   (*AICA_CMD_COUNT)++;
@@ -128,7 +132,7 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
 
     cmd2chnl(flow, cmd);
 
-    uint32_t cmd_size = 6u + ((uint32_t)cmd->length << 1);
+    uint32_t cmd_size = 6u + ((uint32_t)AFX_CMD_GET_LENGTH(cmd) << 1);
     cmd_size = (cmd_size + 3u) & ~3u;
     offset += cmd_size;
   }

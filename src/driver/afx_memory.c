@@ -1,5 +1,6 @@
 #include <afx/host.h>
 #include <afx/memory.h>
+#include <dc/spu.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -205,7 +206,7 @@ bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size) {
     return false;
   if (!range_fits_dynamic(spu_addr, size))
     return false;
-  memcpy((void *)(uintptr_t)(SPU_RAM_BASE_SH4 + spu_addr), src, size);
+  spu_memload(spu_addr, (void*)src, size);
   return true;
 }
 

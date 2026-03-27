@@ -486,16 +486,16 @@ int cmp_flow_cmds(const void *a, const void *b) {
 }
 
 static uint32_t afx_cmd_padded_size(const afx_cmd_t *cmd) {
-    uint32_t size = 6u + ((uint32_t)cmd->length << 1);
+    uint32_t size = 6u + ((uint32_t)AFX_CMD_GET_LENGTH(cmd) << 1);
     return AFX_ALIGN4(size);
 }
 
 static bool afx_cmd_get_sa_hi_word(const afx_cmd_t *cmd, uint16_t *out_val) {
     if (!cmd || !out_val) return false;
-    if (cmd->offset > AICA_REG_SA_HI) return false;
-    if ((uint32_t)cmd->offset + (uint32_t)cmd->length <= AICA_REG_SA_HI) return false;
+    if (AFX_CMD_GET_OFFSET(cmd) > AICA_REG_SA_HI) return false;
+    if ((uint32_t)AFX_CMD_GET_OFFSET(cmd) + (uint32_t)AFX_CMD_GET_LENGTH(cmd) <= AICA_REG_SA_HI) return false;
 
-    *out_val = cmd->values[AICA_REG_SA_HI - cmd->offset];
+    *out_val = cmd->values[AICA_REG_SA_HI - AFX_CMD_GET_OFFSET(cmd)];
     return true;
 }
 
@@ -516,7 +516,7 @@ static uint32_t remap_flow_slots_minimize(uint8_t *stream, uint32_t size) {
     uint32_t ptr = 0;
     while (ptr < size) {
         afx_cmd_t *cmd = (afx_cmd_t *)(void *)(stream + ptr);
-        uint8_t old_slot = cmd->slot;
+        uint8_t old_slot = AFX_CMD_GET_SLOT(cmd);
         uint8_t new_slot = old_to_new[old_slot];
         uint16_t sa_hi_word = 0;
         bool has_sa_hi = afx_cmd_get_sa_hi_word(cmd, &sa_hi_word);
@@ -534,7 +534,7 @@ static uint32_t remap_flow_slots_minimize(uint8_t *stream, uint32_t size) {
         }
 
         if (new_slot != 0xFF) {
-            cmd->slot = new_slot;
+            AFX_CMD_SET_SLOT(cmd, new_slot);
         }
 
         if (is_key_off && new_slot != 0xFF) {
