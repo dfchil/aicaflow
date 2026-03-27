@@ -197,9 +197,9 @@ void arm_main(void) {
       }
       if (flow->status == AFX_FLOW_PLAYING) {
         active = 1;
-        if (flow->next_event_tick + flow->tick_adjust <= *AICA_VIRTUAL_CLOCK) {
+        // if (flow->next_event_tick + flow->tick_adjust <= *AICA_VIRTUAL_CLOCK) {
           flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
-        }
+        // }
 
         if (((afx_header_t *)flow->afx_base)->total_ticks > 0 &&
             (*AICA_VIRTUAL_CLOCK) - flow->tick_adjust >=

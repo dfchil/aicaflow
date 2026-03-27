@@ -62,6 +62,13 @@ uint8_t clean_test_pcm16[] = {
 #embed "../embeds/simple/sfx/PCM/16/clean-audio-test-tone.dca"
 };
 
+uint8_t afx_test[] = {
+#embed "../embeds/simple/afx/test.afx"
+};
+
+
+
+
 typedef struct {
   struct {
     char name[48];
@@ -73,7 +80,6 @@ typedef struct {
     uint32_t active_controller : 2;
     int32_t cursor_pos : 5;
     int32_t loaded_pattern : 5;
-    uint8_t pan : 8;
     uint32_t reserved : 12;
   };
   int sounds[6];
@@ -88,7 +94,7 @@ typedef struct {
  * returns flow slot index (0-63) on success, or 0 on failure (since slot 0 is
  * used, caller must check for flow upload success to disambiguate)
  */
-static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
+static uint32_t create_sfx_flow(uint32_t sample_handle) {
   afx_sample_info_t info;
   if (!afx_sample_get_info(sample_handle, &info)) {
     printf("[SFX] sample info lookup failed: handle=%lu\n",
@@ -103,13 +109,13 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
     num_samples /= info.channels;
   uint32_t duration_ms = num_samples ? (num_samples * 1000u) / info.rate + 1u : 1000u;
 
-  uint8_t dipan = (uint8_t)((uint32_t)pan * 0x1Fu / 255u);
+  uint8_t dipan = 15;
 
-  printf("[SFX] sample=%lu spu=0x%08lx len=%lu rate=%lu bits=%u ch=%u pan=%u "
+  printf("[SFX] sample=%lu spu=0x%08lx len=%lu rate=%lu bits=%u ch=%u "
          "dipan=%u dur=%lums\n\n",
          (unsigned long)sample_handle, (unsigned long)info.spu_addr,
          (unsigned long)info.length, (unsigned long)info.rate, info.bitsize,
-         info.channels, pan, dipan, (unsigned long)duration_ms);
+         info.channels, dipan, (unsigned long)duration_ms);
 
   const uint16_t reg_play_ctrl =
       (uint16_t)(offsetof(aica_chnl_packed_t, play_ctrl) / sizeof(uint16_t));
@@ -214,14 +220,13 @@ static uint32_t create_sfx_flow(uint32_t sample_handle, uint8_t pan) {
 
 static void play_sfx(void *data) {
   SPE_state_t *state = (SPE_state_t *)data;
-  printf("[SFX] trigger: idx=%d pan=%u handle=%d\n", state->cursor_pos,
-         state->pan, state->sounds[state->cursor_pos]);
+  printf("[SFX] trigger: idx=%d handle=%d\n", state->cursor_pos,
+         state->sounds[state->cursor_pos]);
   if (state->sounds[state->cursor_pos] != -1) {
 
     if (!state->flows[state->cursor_pos]) {
       afx_driver_state_info(drv_state_ptr, "before upload");
-      uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos],
-                                     state->pan);
+      uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos]);
       if (flow) {
         printf("[SFX] created flow: 0x%08lx\n", (unsigned long)flow);
         state->flows[state->cursor_pos] = flow;
@@ -268,21 +273,6 @@ void render(void *data) {
   enj_font_scale_set(1);
   textpos_y += 4 * enj_qfont_get_header()->line_height;
 
-  /* show pan */
-  enj_qfont_color_set(255, 255, 255); /* White */
-  enj_qfont_write("Current pan:", MARGIN_LEFT, textpos_y, PVR_LIST_PT_POLY);
-  textpos_y += enj_qfont_get_header()->line_height;
-  char pan_str[7];
-  snprintf(pan_str, sizeof(pan_str), "<%d>", state->pan - 128);
-  int8_t signed_pan = (int8_t)(state->pan - 128);
-  uint8_t red = signed_pan > 0 ? 0 : 127 + abs(signed_pan);
-  uint8_t green = signed_pan < 0 ? 0 : 127 + abs(signed_pan);
-  uint8_t blue = 255 - ((abs(signed_pan) - 1) << 1);
-
-  enj_qfont_color_set(red, green, blue);
-  enj_qfont_write(pan_str, (vid_mode->width >> 1) + (signed_pan << 1),
-                  textpos_y, PVR_LIST_PT_POLY);
-  textpos_y = (vid_mode->height >> 4) * 4;
 
   /* show menu  */
   enj_qfont_color_set(255, 255, 255); /* White */
@@ -308,7 +298,7 @@ void render(void *data) {
   enj_qfont_color_set(255, 255, 255); /* White */
 
   const char *longest_line =
-      "Hold X and move stick to set pan, release X to hold pan position";
+      "Tap X to dump AFX driver state to console";
   textpos_x = vid_mode->width -
               (enj_font_string_width(longest_line, enj_qfont_get_header()) +
                MARGIN_LEFT);
@@ -359,9 +349,13 @@ int main(__unused int argc, __unused char **argv) {
   }
   afx_driver_state_info(drv_state_ptr, "after init");
 
+  uint32_t song_pos = afx_upload_afx(afx_test, sizeof(afx_test));
+  uint8_t flow_slot = afx_flow_activate(song_pos);
+  afx_flow_play(flow_slot);
+  
+
   SPE_state_t rat_state = {
       .cursor_pos = 0,
-      .pan = 128,
       .sounds =
           {
               load_dca_blob(wilhelm_adpcm_data),
