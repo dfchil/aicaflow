@@ -157,8 +157,10 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
     const afx_header_t *hdr =
         (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
                                           flow_state->afx_base);
+    uint32_t channel_map_arena = flow_state->channel_map >> 6u;
+    uint32_t channel_arena_offset = (flow_state->channel_map & 0x3Fu);
     for (uint32_t ch = 0; ch < hdr->required_channels; ch++) {
-      uint8_t hw_ch = afx_channel_map_get(flow_state, ch);
+      uint8_t hw_ch = ((uint8_t*)flow_state->channel_map)[ch];
       mask |= (1ULL << hw_ch);
     }
     afx_channels_release(mask);
@@ -264,7 +266,7 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
                        sizeof(channel_map_str) - cm_len,
                        "[");
     for (uint32_t ch = 0; ch < required_channels; ch++) {
-      uint32_t hw = afx_channel_map_get(f, ch);
+      uint32_t hw = ((uint8_t*)f->channel_map)[ch];
       if (hw != AFX_FLOW_CHANNEL_MAP_INVALID) {
         cm_len += snprintf(channel_map_str + cm_len,
                            sizeof(channel_map_str) - cm_len,
@@ -370,11 +372,17 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
   flow_template.sample_addr_mode = uses_external_samples;
   flow_template.status = AFX_FLOW_STOPPED;
 
+
+  uint8_t channel_map[64];
+
   /* map virtual channels */
   uint32_t flow_chn = 0;
   for (uint32_t hw = 0; hw < 64u; hw++) {
     if (channel_mask & (1ULL << hw)) {
-      afx_channel_map_set(flow_template.channel_map, flow_chn++, hw);
+      channel_map[flow_chn] = (uint8_t)hw;
+      flow_chn++;
+      if (flow_chn >= required_channels)
+        break;
     }
   }
 

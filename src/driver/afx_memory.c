@@ -12,8 +12,6 @@ aica_state_t g_aica_state = {
     .dynamic_cursor = 0,
 };
 
-uint64_t g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
-
 #define AFX_FREE_BLOCK_CAPACITY 128u
 #define AFX_SAMPLE_HANDLE_CAPACITY 64u
 #define AFX_AFX_ALLOC_CAPACITY 128u
@@ -35,8 +33,6 @@ typedef struct {
 static afx_free_block_t g_free_blocks[AFX_FREE_BLOCK_CAPACITY];
 static uint32_t g_free_block_count = 0;
 static afx_sample_slot_t g_sample_slots[AFX_SAMPLE_HANDLE_CAPACITY];
-static uint64_t g_flow_pool_alloc_mask =
-    0ull; /* One bit per flow slot, 64 max. */
 static afx_free_block_t g_afx_allocs[AFX_AFX_ALLOC_CAPACITY];
 static uint32_t g_afx_alloc_count = 0;
 
@@ -139,7 +135,6 @@ void afx_mem_reset(uint32_t dynamic_base) {
   g_aica_state.dynamic_cursor = dynamic_base;
   reset_free_list(dynamic_base);
   reset_sample_slots();
-  g_flow_pool_alloc_mask = 0ull;
   g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
 }
 
@@ -210,46 +205,6 @@ bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size) {
   return true;
 }
 
-uint64_t afx_channels_allocate(uint8_t num_channels) {
-  if (num_channels == 0 || num_channels > 64)
-    return 0;
-
-  uint64_t allocated = 0;
-  for (uint32_t bit = 0; bit < 64u && num_channels > 0; bit++) {
-    uint64_t b = (1ULL << bit);
-    if (g_host_available_channels & b) {
-      g_host_available_channels &= ~b;
-      allocated |= b;
-      num_channels--;
-    }
-  }
-  if (num_channels != 0) {
-    g_host_available_channels |= allocated;
-    return 0;
-  }
-  return allocated;
-}
-
-void afx_channels_release(uint64_t channel_mask) {
-  g_host_available_channels |= channel_mask;
-}
-
-bool afx_sample_free(uint32_t sample_handle) {
-  uint32_t slot_idx = 0;
-  if (!resolve_sample_handle(sample_handle, &slot_idx))
-    return false;
-
-  afx_sample_slot_t *slot = &g_sample_slots[slot_idx];
-  if (!afx_mem_free(slot->info.spu_addr, slot->info.length))
-    return false;
-
-  slot->in_use = false;
-  memset(&slot->info, 0, sizeof(slot->info));
-  slot->generation++;
-  if (slot->generation == 0)
-    slot->generation = 1;
-  return true;
-}
 
 uint32_t afx_sample_get_spu_addr(uint32_t sample_handle) {
   uint32_t slot_idx = 0;
@@ -266,6 +221,23 @@ bool afx_sample_get_info(uint32_t sample_handle, afx_sample_info_t *out_info) {
     return false;
 
   *out_info = g_sample_slots[slot_idx].info;
+  return true;
+}
+
+bool afx_sample_free(uint32_t sample_handle) {
+  uint32_t slot_idx = 0;
+  if (!resolve_sample_handle(sample_handle, &slot_idx))
+    return false;
+
+  afx_sample_slot_t *slot = &g_sample_slots[slot_idx];
+  if (!afx_mem_free(slot->info.spu_addr, slot->info.length))
+    return false;
+
+  slot->in_use = false;
+  memset(&slot->info, 0, sizeof(slot->info));
+  slot->generation++;
+  if (slot->generation == 0)
+    slot->generation = 1;
   return true;
 }
 

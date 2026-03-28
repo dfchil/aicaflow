@@ -33,7 +33,7 @@ Detailed architecture diagrams and runtime memory-flow notes are maintained in `
 | **FLOW** | Array of variable-size `afx_cmd_t` entries: timestamp, flow-local channel offset, register span, values. |
 | **SDES** | Array of `afx_sample_desc_t` entries with source ID, GM program, format, loop info, root note, sample rate, and offsets. |
 | **SDAT** | Raw ADPCM or PCM sample bytes packed back-to-back. |
-| **DSPM / DSPC / META** | Optional DSP and metadata payload sections. `META` currently stores song playback metadata such as required channel count. |
+| **DSPM / DSPC** | Optional DSP sections.  |
 
 Relevant format properties:
 

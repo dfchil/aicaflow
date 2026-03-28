@@ -21,11 +21,10 @@
 
 /* Section IDs (ASCII 4CC stored in little-endian uint32) */
 #define AFX_SECT_FLOW 0x574F4C46u /* 'FLOW' */
-#define AFX_SECT_SDES 0x53454453u /* 'SDES' */
-#define AFX_SECT_SDAT 0x54414453u /* 'SDAT' */
-#define AFX_SECT_DSPM 0x4D505344u /* 'DSPM' */
-#define AFX_SECT_DSPC 0x43505344u /* 'DSPC' */
-#define AFX_SECT_META 0x4154454Du /* 'META' */
+#define AFX_SECT_SDES 0x53454453u /* 'SDES' sample descriptors */
+#define AFX_SECT_SDAT 0x54414453u /* 'SDAT' sample data */
+#define AFX_SECT_DSPM 0x4D505344u /* 'DSPM' DSP code */
+#define AFX_SECT_DSPC 0x43505344u /* 'DSPC' DSP configuration */
 
 /* Sample format codes */
 #define AFX_FMT_PCM16 0

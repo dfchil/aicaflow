@@ -67,7 +67,7 @@ patch_relative_sample_addr_words(const volatile afx_flow_state_t *flow,
 
 static inline void cmd2chnl(volatile afx_flow_state_t *flow,
                             const afx_cmd_t *cmd) {
-  uint32_t hw_slot = afx_channel_map_get(flow, (uint32_t)AFX_CMD_GET_SLOT(cmd));
+  uint32_t hw_slot = ((uint8_t*)flow->channel_map)[AFX_CMD_GET_SLOT(cmd)];
   uint32_t base_ptr = AICA_REG_BASE + (hw_slot << 7);
   uint32_t reg_idx = AFX_CMD_GET_OFFSET(cmd);
 

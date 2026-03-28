@@ -25,8 +25,6 @@ bool afx_sample_free(uint32_t sample_handle);
 uint32_t afx_sample_get_spu_addr(uint32_t sample_handle);
 bool afx_sample_get_info(uint32_t sample_handle, afx_sample_info_t *out_info);
 
-uint64_t afx_channels_allocate(uint8_t num_channels);
-void afx_channels_release(uint64_t channel_mask);
 
 
 static inline bool range_fits_dynamic(uint32_t addr, uint32_t size) {

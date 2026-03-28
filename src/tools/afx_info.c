@@ -253,10 +253,14 @@ int main(int argc, char **argv) {
 
                 if (values_read < length) break;
                 
-                if (length & 1) {
+                uint32_t cmd_size = 6 + (length * 2);
+                uint32_t padded_size = (cmd_size + 3) & ~3;
+                uint32_t pad_bytes = padded_size - cmd_size;
+                
+                if (pad_bytes > 0) {
                     uint16_t pad;
-                    if (fread(&pad, 2, 1, f) == 1) {
-                        bytes_read += 2;
+                    if (fread(&pad, pad_bytes, 1, f) == 1) {
+                        bytes_read += pad_bytes;
                     }
                 }
             }

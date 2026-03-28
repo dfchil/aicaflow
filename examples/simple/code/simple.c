@@ -63,7 +63,7 @@ uint8_t clean_test_pcm16[] = {
 };
 
 uint8_t afx_test[] = {
-#embed "../embeds/simple/afx/test.afx"
+#embed "../embeds/simple/afx/grieg.afx"
 };
 
 
@@ -146,7 +146,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle) {
   
   afx_cmd_t *cmd0 = (afx_cmd_t *)cursor;
   cmd0->timestamp = 0;
-  AFX_CMD_SET_SLOT(cmd0, 0);
+  cmd0->pack = 0; AFX_CMD_SET_SLOT(cmd0, 0);
   AFX_CMD_SET_OFFSET(cmd0, reg_play_ctrl);
   AFX_CMD_SET_LENGTH(cmd0, startup_reg_count);
   
@@ -176,6 +176,40 @@ static uint32_t create_sfx_flow(uint32_t sample_handle) {
   /* packed: dipan[0:4], res[5:7], disdl[8:11], imxl[12:15] */
   chncfg->pan.raw = (dipan) | (0xFu << 8);
 
+  // TODO: investigate if this is stable across arm7<->sh4 toolchains, or if we need to use explicit bit shifts/masks to pack the command values
+  // aica_chnl_packed_t *chnlcfg = (aica_chnl_packed_t *)cmd0->values;
+  // chnlcfg->play_ctrl.bits = (typeof(chnlcfg->play_ctrl.bits)){
+  //   .key_on_ex = 1u,
+  //   .key_on = 1u,
+  //   .sa_high = (uint16_t)((info.spu_addr >> 16) & 0x7Fu),
+  //   .pcms = (info.bitsize == 16) ? 0 : (info.bitsize == 8) ? 1 : 2,
+  //   .lpctl = 0u,
+  //   .ssctl = 0u
+  // };
+  // chnlcfg->sa_low = (uint16_t)(info.spu_addr & 0xFFFFu);
+  // chnlcfg->lsa = 0u;
+  // chnlcfg->lea = num_samples > (1<<16) - 1 ? (1<<16) - 1 : (uint16_t)num_samples;
+  // chnlcfg->env_ad.bits = (typeof(chnlcfg->env_ad.bits)){
+  //   .ar = 31u,
+  //   .d1r = 0u,
+  //   .d2r = 0u
+  // };
+  // chnlcfg->env_dr.bits = (typeof(chnlcfg->env_dr.bits)){
+  //   .rr = 15u,
+  //   .dl = 0u,
+  //   .krs = 0u,
+  //   .lpslnk = 0u
+  // };
+  // chnlcfg->pitch.raw = (uint16_t)fDaConvertFrequency(info.rate);
+  // chnlcfg->env_fm.bits = (typeof(chnlcfg->env_fm.bits)){
+  //   .tl = 0u,
+  //   .fb = 0u,
+  // };
+  // chnlcfg->pan.bits = (typeof(chnlcfg->pan.bits)){
+  //   .dipan = dipan,
+  //   .disdl = 0xFu
+  // };
+
   printf("[SFX] regs slot=%u pcms=%u sa_hi=%u sa_lo=0x%04x fns_oct=0x%04x "
          "tl=%u disdl=%u\n",
          AFX_CMD_GET_SLOT(cmd0), pcms,
@@ -189,7 +223,7 @@ static uint32_t create_sfx_flow(uint32_t sample_handle) {
   /* Terminating key-off command at end of sample time */
   afx_cmd_t *cmd1 = (afx_cmd_t *)cursor;
   cmd1->timestamp = duration_ms;
-  AFX_CMD_SET_SLOT(cmd1, 0);
+  cmd1->pack = 0; AFX_CMD_SET_SLOT(cmd1, 0);
   AFX_CMD_SET_OFFSET(cmd1, reg_play_ctrl);
   AFX_CMD_SET_LENGTH(cmd1, 1);
 
@@ -225,7 +259,6 @@ static void play_sfx(void *data) {
   if (state->sounds[state->cursor_pos] != -1) {
 
     if (!state->flows[state->cursor_pos]) {
-      afx_driver_state_info(drv_state_ptr, "before upload");
       uint32_t flow = create_sfx_flow((uint32_t)state->sounds[state->cursor_pos]);
       if (flow) {
         printf("[SFX] created flow: 0x%08lx\n", (unsigned long)flow);
@@ -241,7 +274,6 @@ static void play_sfx(void *data) {
     printf("[SFX] flow activate returned slot %u\n", drv_state_ptr->flow_count_active > 0 ? slot : 0xFFu);
 
     afx_flow_play(slot);
-    afx_driver_state_info(drv_state_ptr, "after play");
   } else {
     printf("[SFX] trigger ignored: invalid sample handle\n");
   }

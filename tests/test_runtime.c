@@ -28,7 +28,6 @@ static void test_struct_layout(void) {
     assert(AICAF_CMD_SEEK_FLOW == 6u);
     assert(AFX_SECT_FLOW == 0x574F4C46u);
     assert(AFX_SECT_SDAT == 0x54414453u);
-    assert(AFX_SECT_META == 0x4154454Du);
 
     /* Packed-flow command layout is part of the file ABI. */
     assert(offsetof(afx_cmd_t, timestamp) == 0u);

@@ -309,9 +309,12 @@ static uint8_t encode_adpcm_nibble(int16_t sample, int *predicted, int *step_ind
     if (*step_index > 88) *step_index = 88;
     return nibble;
 }
-static void pack_file(const char *path, uint8_t program, uint32_t source_id, FILE *f_out, uint32_t *offset, bool use_adpcm, bool do_trim) {
+static bool pack_file(const char *path, uint8_t program, uint32_t source_id, FILE *f_out, uint32_t *offset, bool use_adpcm, bool do_trim) {
     FILE *f_wav = fopen(path, "rb");
-    if (!f_wav) return;
+    if (!f_wav) {
+        fprintf(stderr, "Warning: Failed to open sample file '%s' for program %u\n", path, program);
+        return false;
+    }
 
     char chunk_id[4];
     uint32_t data_size = 0;
@@ -399,6 +402,7 @@ static void pack_file(const char *path, uint8_t program, uint32_t source_id, FIL
         if (buf) free(buf);
     }
     fclose(f_wav);
+    return true;
 }
 /*
  * write_patch_flow_cmds — emit all per-voice register writes for a note-on.
@@ -413,24 +417,23 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
     patch_info_t p = instrument_bank[program];
     if (p.size == 0) return;
 
+    uint32_t cmd_size = 6 + (6 * 2);
+    cmd_size = (cmd_size + 3) & ~3;
+
+    afx_cmd_t *cmd = (afx_cmd_t *)(buffer + *buffer_size);
+    memset(cmd, 0, cmd_size);
+    cmd->timestamp = timestamp;
+    cmd->pack = 0;
+    AFX_CMD_SET_SLOT(cmd, slot);
+    AFX_CMD_SET_OFFSET(cmd, AICA_REG_SA_HI);
+    AFX_CMD_SET_LENGTH(cmd, 6);
+
     /* Bit 15: Key On, Bit 9: Loop, Bits [8:7]: Format, Bits [6:0]: SA_HI */
     uint32_t loop_bit = (sample_descs[program].loop_mode != AFX_LOOP_NONE) ? (1u << 9) : 0;
     uint32_t format_bits = (uint32_t)(p.format & 0x3) << 7;
     uint16_t ctl_val = (uint16_t)((1u << 15) | loop_bit | format_bits | (p.addr >> 16));
 
-    /* We write 6 core registers in a single burst: SA_HI, SA_LO, LSA, LEA, D2R_D1R, EGH_RR */
-    /* Header: ts(4), slot/off/len(2) */
-    uint32_t ts = timestamp;
-    uint16_t bits = (slot & 0x3F) | (AICA_REG_SA_HI << 6) | (6 << 11);
-    
-    memcpy(buffer + *buffer_size, &ts, 4);
-    memcpy(buffer + *buffer_size + 4, &bits, 2);
-    *buffer_size += 6;
-
-    /* Build first 6 payload words directly in the output stream. */
-    uint16_t *payload_words = (uint16_t *)(void *)(buffer + *buffer_size);
-    for (int i = 0; i < 6; i++) payload_words[i] = 0;
-    aica_chnl_packed_t *payload = (aica_chnl_packed_t *)(void *)payload_words;
+    aica_chnl_packed_t *payload = (aica_chnl_packed_t *)cmd->values;
     payload->play_ctrl.raw = ctl_val;                        /* SA_HI/CTL */
     payload->sa_low = (uint16_t)(p.addr & 0xFFFF);           /* SA_LO */
 
@@ -449,23 +452,26 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
                                      ((uint32_t)(dl & 0x1F) << 3) |
                                      (rr & 0x1F));
 
-    *buffer_size += 12;
-    /* length=6 is even, no padding needed for align4 */
+    cmd_size = (cmd_size + 3) & ~3;
+    *buffer_size += cmd_size;
 }
 
 static void write_single_cmd(uint32_t timestamp, uint8_t slot, uint8_t reg, uint16_t value,
                              uint8_t *buffer, uint32_t *buffer_size) {
-    uint32_t ts = timestamp;
-    uint16_t bits = (slot & 0x3F) | ((uint16_t)reg << 6) | (1 << 11);
+    uint32_t cmd_size = 6 + (1 * 2);
+    cmd_size = (cmd_size + 3) & ~3;
+
+    afx_cmd_t *cmd = (afx_cmd_t *)(buffer + *buffer_size);
+    memset(cmd, 0, cmd_size);
+    cmd->timestamp = timestamp;
+    cmd->pack = 0;
+    AFX_CMD_SET_SLOT(cmd, slot);
+    AFX_CMD_SET_OFFSET(cmd, reg);
+    AFX_CMD_SET_LENGTH(cmd, 1);
     
-    memcpy(buffer + *buffer_size, &ts, 4);
-    memcpy(buffer + *buffer_size + 4, &bits, 2);
-    memcpy(buffer + *buffer_size + 6, &value, 2);
-    *buffer_size += 8;
-    /* length=1 is odd, needs 2 bytes padding for align4 */
-    uint16_t pad = 0;
-    memcpy(buffer + *buffer_size, &pad, 2);
-    *buffer_size += 2;
+    cmd->values[0] = value;
+
+    *buffer_size += cmd_size;
 }
 
 typedef struct {
@@ -656,8 +662,9 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (!dup) {
-                    pack_file(path, i, sid, f_samples, &offset, use_adpcm, do_trim);
-                    source_count++;
+                    if (pack_file(path, i, sid, f_samples, &offset, use_adpcm, do_trim)) {
+                        source_count++;
+                    }
                 } else {
                     printf("Reusing sample for Program %d [%08X]\n", i, sid);
                 }
@@ -667,7 +674,7 @@ int main(int argc, char **argv) {
     }
     uint32_t sample_data_size = offset;
     fseek(f_mid, 14, SEEK_SET);
-    afx_sample_desc_t *s_entries = malloc(sizeof(afx_sample_desc_t) * source_count);
+    afx_sample_desc_t *s_entries = calloc(source_count, sizeof(afx_sample_desc_t));
     int s_idx = 0;
     for(int i=0; i<128; i++) {
         if(instrument_bank[i].size > 0) {
