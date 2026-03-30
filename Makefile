@@ -2,7 +2,7 @@
 
 .PHONY: all clean tools driver test test-unit test-integration help submodules examples
 
-all: submodules tools driver examples
+all: submodules driver tools examples
 
 examples:
 	@echo "--- Building Examples ---"
@@ -12,7 +12,7 @@ submodules:
 	@echo "--- Initializing Git Submodules ---"
 	git submodule update --init --recursive
 
-tools:
+tools: driver
 	@echo "--- Building Host Tools (C23) ---"
 	$(MAKE) -C src/tools
 

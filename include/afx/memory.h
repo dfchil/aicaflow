@@ -4,9 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <afx/driver.h>
-
-extern aica_state_t g_aica_state;
-extern uint64_t g_host_available_channels;
+#include <afx/host.h>
 
 void afx_mem_reset(uint32_t dynamic_base);
 uint32_t afx_mem_alloc(uint32_t size, uint32_t align);
@@ -44,16 +42,5 @@ static inline uint32_t align_up_u32(uint32_t value, uint32_t align) {
   return (value + mask) & ~mask;
 }
 
-static inline bool is_dynamic_range_valid(uint32_t addr, uint32_t size) {
-  if (size == 0)
-    return false;
-  if (addr < g_aica_state.dynamic_base)
-    return false;
-  if (addr >= AFX_DRIVER_STATE_ADDR)
-    return false;
-  if (addr + size < addr)
-    return false;
-  return (addr + size) <= AFX_DRIVER_STATE_ADDR;
-}
 
 #endif /* AFX_MEMORY_H */

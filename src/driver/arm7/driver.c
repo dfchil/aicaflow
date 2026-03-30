@@ -117,7 +117,7 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
                                             uint32_t tick) {
   uint32_t offset = flow->flow_offset;
   const afx_header_t *hdr = (const afx_header_t *)(flow->afx_base);
-  const afx_section_entry_t *flow_sect = find_afx_section(hdr, AFX_SECT_FLOW);
+  const afx_section_entry_t *flow_sect = (const afx_section_entry_t*)(hdr + 1);
 
   uint32_t next_event_rel = 0;
   while (offset < flow_sect->size) {

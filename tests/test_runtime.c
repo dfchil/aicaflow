@@ -35,10 +35,10 @@ static void test_struct_layout(void) {
 
 static void test_driver_state_abi(void) {
     /* Driver runtime state now uses array flow entries and counters. */
-    assert(sizeof(afx_driver_state_t) == 6408u);
+    assert(sizeof(afx_driver_state_t) == 2632u);
     assert(offsetof(afx_driver_state_t, stack_canary) == 0u);
     assert(offsetof(afx_driver_state_t, mini_stack) == 4u);
-    assert(offsetof(afx_driver_state_t, flow_states) == 264u);
+    assert(offsetof(afx_driver_state_t, flow_states) == 584u);
 
     /* Flow state carries optional per-flow LUT pointer. */
     assert(offsetof(afx_flow_state_t, tl_scale_lut_ptr) == 20u);

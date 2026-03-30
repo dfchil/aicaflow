@@ -7,7 +7,7 @@
 #define AFX_FLOW_CHANNEL_MAP_ENTRIES 64
 #define AFX_FLOW_CHANNEL_MAP_BITS_PER_ENTRY 6
 #define AFX_FLOW_CHANNEL_MAP_INVALID ((uint32_t)0xFFFFFFFFu)
-#define AFX_FLOW_CHANNEL_MAP_BYTE_SIZE                                         \
+#define AFX_FLOW_CHANNEL_MAP_BYTE_SIZE \
   ((AFX_FLOW_CHANNEL_MAP_ENTRIES * AFX_FLOW_CHANNEL_MAP_BITS_PER_ENTRY) >> 3)
 
 /* Flow pool geometry */
@@ -16,8 +16,8 @@
 /* Flow-level flags (afx_flow_state_t.flags) */
 #define AFX_FLOW_FLAG_SAMPLE_ADDRS_ABSOLUTE 0x00000001u
 
-#pragma pack(push, 1) // Ensure no padding in these structures for direct memory
-                      // mapping to SPU RAM
+#pragma pack(push, 1)  // Ensure no padding in these structures for direct
+                       // memory mapping to SPU RAM
 
 typedef struct afx_flow_state {
   /* Stream data */
@@ -30,14 +30,14 @@ typedef struct afx_flow_state {
   uint32_t
       tl_scale_lut_ptr; /* Optional 256-byte TL LUT in AICA RAM (0=disabled) */
   struct {
-    uint32_t
-        sample_addr_mode : 1; /* 0=Relative to afx_base, 1=Absolute SPU addr */
-    uint32_t status : 3;      /* AFX_FLOW_STOPPED/PLAYING/PAUSED/DRAINING */
+    uint32_t sample_addr_mode
+        : 1;             /* 0=Relative to afx_base, 1=Absolute SPU addr */
+    uint32_t status : 3; /* AFX_FLOW_STOPPED/PLAYING/PAUSED/DRAINING */
     uint32_t reserved : 28;
   };
   uint32_t channel_map; /* absolute SPU address of channel map */
 } afx_flow_state_t;
-_Static_assert(sizeof(afx_flow_state_t) == 64u, "afx_flow_state_t != 64 bytes");
+_Static_assert(sizeof(afx_flow_state_t) == 32u, "afx_flow_state_t != 32 bytes");
 
 /* Global Driver State (runtime + stack canary). */
 typedef struct {
@@ -48,19 +48,20 @@ typedef struct {
     uint32_t arm_status : 2;        /* 0=Idle, 1=Playing, 3=Error */
     uint32_t reserved : 24;
   };
-  uint8_t chan_arenas[5][64]; /* arena[0] for 1-4 channels, arena[1] for 5-8
-                                 channels, arena[2] for 9-16 channels, arena[3] for
-                                 17-32 channels, arena[4] for 33-64 channels */
+  uint8_t chan_arenas[5]
+                     [64]; /* arena[0] for 1-4 channels, arena[1] for 5-8
+                              channels, arena[2] for 9-16 channels, arena[3] for
+                              17-32 channels, arena[4] for 33-64 channels */
   afx_flow_state_t
-      flow_states[AFX_FLOW_POOL_CAPACITY]; /* Active flow states stored
-                                               directly in driver state for
-                                              easy access by ARM7 */
+      flow_states[AFX_FLOW_POOL_CAPACITY]; /* All possible simultaneously active
+                                              driver state for easy access by
+                                              ARM7 */
 } afx_driver_state_t;
 
 #pragma pack(pop)
 
 /* Memory Map Addresses */
-#define AFX_DRIVER_STATE_ADDR                                                  \
+#define AFX_DRIVER_STATE_ADDR \
   ((AFX_MEM_CLOCKS - sizeof(afx_driver_state_t)) & ~31)
 
 #define AICA_REG_SA_HI 0x00
@@ -73,17 +74,5 @@ typedef struct {
 #define AICA_REG_LFO 0x07
 #define AICA_REG_TOT_LVL 0x08
 #define AICA_REG_PAN_VOL 0x09
-
-static const afx_section_entry_t *find_afx_section(const afx_header_t *hdr,
-                                                   uint32_t section_id) {
-  if (!hdr)
-    return NULL;
-  const afx_section_entry_t *sections = (const afx_section_entry_t *)(hdr + 1);
-  for (uint32_t i = 0; i < hdr->section_count; i++) {
-    if (sections[i].id == section_id)
-      return &sections[i];
-  }
-  return NULL;
-}
 
 #endif /* AFX_DRIVER_H */

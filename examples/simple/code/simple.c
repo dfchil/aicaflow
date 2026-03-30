@@ -368,6 +368,10 @@ void main_mode_updater(void *data) {
 }
 
 int main(__unused int argc, __unused char **argv) {
+
+  printf("offsetof afx_driver_state_t, flow_states) = %lu\n",
+         (unsigned long)offsetof(afx_driver_state_t, flow_states));
+
   enj_state_init_defaults();
   if (enj_state_startup() != 0) {
     ENJ_DEBUG_PRINT("enDjinn startup failed, exiting\n");

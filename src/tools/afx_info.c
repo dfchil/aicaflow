@@ -45,6 +45,23 @@ reg_stat_t stats[] = {
     { 0xFF,             "OTHER",    0 }
 };
 
+typedef struct {
+    uint32_t ts;
+    uint8_t slot;
+    uint8_t offset;
+    uint8_t length;
+    uint16_t values[32];
+} flow_cmd_t;
+
+static int flow_cmd_cmp(const void *a, const void *b) {
+    const flow_cmd_t *ca = (const flow_cmd_t *)a;
+    const flow_cmd_t *cb = (const flow_cmd_t *)b;
+    if (ca->offset != cb->offset) return (int)ca->offset - (int)cb->offset;
+    if (ca->length != cb->length) return (int)ca->length - (int)cb->length;
+    if (ca->length == 0) return 0;
+    return memcmp(ca->values, cb->values, ca->length * sizeof(uint16_t));
+}
+
 static bool decode_slot_payload(uint8_t offset, uint8_t length,
                                 const uint16_t *values,
                                 aica_chnl_packed_t *out) {
@@ -141,6 +158,19 @@ int main(int argc, char **argv) {
     double sample_pct = (double)sample_data_size / total_size * 100.0;
     double flow_cmd_pct = (double)flow_data_size / total_size * 100.0;
 
+    flow_cmd_t *flow_cmds = NULL;
+    uint32_t flow_cmds_found = 0;
+    bool dedup_enabled = false;
+
+    if (flow_cmd_count > 0) {
+        flow_cmds = malloc(flow_cmd_count * sizeof(flow_cmd_t));
+        if (flow_cmds) {
+            dedup_enabled = true;
+        } else {
+            fprintf(stderr, "Warning: Could not allocate memory for flow command deduplication; skipping this analysis.\n");
+        }
+    }
+
     uint32_t total_sec = total_ticks / 1000;
     uint32_t mm = total_sec / 60;
     uint32_t ss = total_sec % 60;
@@ -209,6 +239,15 @@ int main(int argc, char **argv) {
                 aica_chnl_packed_t payload;
                 bool has_payload = decode_slot_payload(offset, values_read, values, &payload);
 
+                if (dedup_enabled && flow_cmds_found < flow_cmd_count) {
+                    flow_cmd_t *cmd = &flow_cmds[flow_cmds_found++];
+                    cmd->ts = ts;
+                    cmd->slot = slot;
+                    cmd->offset = offset;
+                    cmd->length = values_read;
+                    for (uint8_t vi = 0; vi < values_read; vi++) cmd->values[vi] = values[vi];
+                }
+
                 for (uint8_t l = 0; l < values_read; l++) {
                     uint16_t val = values[l];
                     uint8_t reg = (uint8_t)(offset + l);
@@ -274,6 +313,46 @@ int main(int argc, char **argv) {
                 else
                     printf("  [----] %-10s : %u\n", stats[i].name, stats[i].count);
             }
+        }
+
+        if (dedup_enabled && flow_cmds_found > 1) {
+            qsort(flow_cmds, flow_cmds_found, sizeof(*flow_cmds), flow_cmd_cmp);
+            uint32_t reuse_groups = 0;
+            uint32_t total_reused_cmds = 0;
+            for (uint32_t i = 0; i < flow_cmds_found; ) {
+                uint32_t j = i + 1;
+                while (j < flow_cmds_found && flow_cmd_cmp(&flow_cmds[i], &flow_cmds[j]) == 0) {
+                    j++;
+                }
+                uint32_t group_size = j - i;
+                if (group_size > 1 && flow_cmds[i].length > 1) {
+                    if (reuse_groups == 0) {
+                        printf("\nPotential Duplicate Commands (timing/channel ignored):\n");
+                    }
+                    reuse_groups++;
+                    total_reused_cmds += group_size;
+                    printf("  Group %u: offset=0x%02X length=%u repeats=%u\n", reuse_groups, flow_cmds[i].offset, flow_cmds[i].length, group_size);
+                    for (uint32_t k = i; k < j && k < i + 5; k++) {
+                        printf("    instance [%u] slot=%u ts=%u\n", k - i + 1, flow_cmds[k].slot, flow_cmds[k].ts);
+                    }
+                    if (group_size > 5) {
+                        printf("    ...+%u more instances\n", group_size - 5);
+                    }
+                }
+                i = j;
+            }
+            if (reuse_groups == 0) {
+                printf("\nNo command duplicates found when ignoring timing and channel.\n");
+            } else {
+                printf("\nFound %u duplicate groups, %u total commands are reusable candidates.\n", reuse_groups, total_reused_cmds);
+            }
+        } else if (dedup_enabled) {
+            printf("\nNot enough commands to evaluate duplicate patterns.\n");
+        }
+
+        if (flow_cmds) {
+            free(flow_cmds);
+            flow_cmds = NULL;
         }
 
         if (source_map_count > 0 && descs) {

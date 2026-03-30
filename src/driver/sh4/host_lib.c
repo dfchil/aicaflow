@@ -1,6 +1,7 @@
 #include <afx/bin/driver_blob.h>
 #include <afx/host.h>
 #include <afx/memory.h>
+#include <afx/channels.h>
 #include <kos.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -32,6 +33,17 @@
 
 #define drv_state_ptr                                                          \
   ((volatile afx_driver_state_t *)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR))
+
+
+static const afx_section_entry_t* find_afx_section(const afx_header_t* hdr,
+                                                   uint32_t section_id) {
+  if (!hdr) return NULL;
+  const afx_section_entry_t* sections = (const afx_section_entry_t*)(hdr + 1);
+  for (uint32_t i = 0; i < hdr->section_count; i++) {
+    if (sections[i].id == section_id) return &sections[i];
+  }
+  return NULL;
+}
 
 static void apply_song_dsp_sections_host(uint32_t flow_spu_addr) {
   const afx_header_t *hdr =
@@ -132,7 +144,6 @@ bool afx_init(void) {
          sizeof(afx_driver_state_t));
 
   afx_mem_reset(dynamic_base);
-  g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
 
   /* Halt then re-enable ARM7 so it boots from the freshly uploaded firmware */
   // 5. Restart ARM7 CPU
@@ -157,13 +168,12 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
     const afx_header_t *hdr =
         (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
                                           flow_state->afx_base);
-    uint32_t channel_map_arena = flow_state->channel_map >> 6u;
-    uint32_t channel_arena_offset = (flow_state->channel_map & 0x3Fu);
     for (uint32_t ch = 0; ch < hdr->required_channels; ch++) {
       uint8_t hw_ch = ((uint8_t*)flow_state->channel_map)[ch];
       mask |= (1ULL << hw_ch);
     }
     afx_channels_release(mask);
+    afx_channel_release_mapping(hdr->required_channels, flow_state->channel_map);
 
     if (slot == drv_state_ptr->flow_count_active - 1) {
       /* Simple case: just decrement active count to retire the last slot */
@@ -227,7 +237,7 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
   printf("[AFX]  flow_count_active = %u\n", (unsigned)driver_state->flow_count_active);
   printf("[AFX]  AICA_CMD_COUNT = %u\n", (unsigned)cmd_count);
   printf("[AFX]  arm_status = %u\n", (unsigned)driver_state->arm_status);
-  printf("[AFX]  HW clock = %u, prev = %u, virtual = %u\n", hw_clock, prev_hw_clock, virtual_clock);
+  printf("[AFX]  HW clock = %lu, prev = %lu, virtual = %lu\n", hw_clock, prev_hw_clock, virtual_clock);
 
   for (uint32_t i = 0; i < 5; i++) {
     const volatile afx_flow_state_t *f = &driver_state->flow_states[i];
@@ -365,26 +375,13 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
 
   afx_flow_state_t flow_template;
   memset(&flow_template, 0, sizeof(flow_template));
+  flow_template.channel_map = afx_channel_setup_mapping(required_channels, channel_mask);
   flow_template.afx_base = flow_spu_addr;
   flow_template.flow_ptr = flow_spu_addr + flow_sect->offset;
   flow_template.flow_offset = 0;
   flow_template.next_event_tick = 0;
   flow_template.sample_addr_mode = uses_external_samples;
   flow_template.status = AFX_FLOW_STOPPED;
-
-
-  uint8_t channel_map[64];
-
-  /* map virtual channels */
-  uint32_t flow_chn = 0;
-  for (uint32_t hw = 0; hw < 64u; hw++) {
-    if (channel_mask & (1ULL << hw)) {
-      channel_map[flow_chn] = (uint8_t)hw;
-      flow_chn++;
-      if (flow_chn >= required_channels)
-        break;
-    }
-  }
 
   drv_state_ptr->flow_states[flow_slot] = flow_template;
   return flow_slot;

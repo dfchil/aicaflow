@@ -53,6 +53,19 @@ static void reset_free_list(uint32_t dynamic_base) {
   g_free_block_count = 1;
 }
 
+static inline bool is_dynamic_range_valid(uint32_t addr, uint32_t size) {
+  if (size == 0)
+    return false;
+  if (addr < g_aica_state.dynamic_base)
+    return false;
+  if (addr >= AFX_DRIVER_STATE_ADDR)
+    return false;
+  if (addr + size < addr)
+    return false;
+  return (addr + size) <= AFX_DRIVER_STATE_ADDR;
+}
+
+
 static bool insert_free_block_sorted(uint32_t addr, uint32_t size) {
   if (!is_dynamic_range_valid(addr, size))
     return false;
@@ -135,7 +148,6 @@ void afx_mem_reset(uint32_t dynamic_base) {
   g_aica_state.dynamic_cursor = dynamic_base;
   reset_free_list(dynamic_base);
   reset_sample_slots();
-  g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
 }
 
 uint32_t afx_mem_alloc(uint32_t size, uint32_t align) {

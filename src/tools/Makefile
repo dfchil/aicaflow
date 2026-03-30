@@ -10,10 +10,14 @@ all: $(OUT_DIR) $(TOOLS)
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
-$(OUT_DIR)/midi2afx: midi2afx.c 
+# $(TOOL_DEP):
+# 	@echo "Building ARM7 driver blob dependency..."
+# 	$(MAKE) -C ../driver/arm7
+
+$(OUT_DIR)/midi2afx: midi2afx.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(OUT_DIR)/afx_info: afx_info.c 
+$(OUT_DIR)/afx_info: afx_info.c
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 clean:
