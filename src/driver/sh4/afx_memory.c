@@ -1,20 +1,24 @@
 #include <afx/host.h>
 #include <afx/memory.h>
+#include <afx/bin/guarded_blob.h>
+
 #include <dc/spu.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "memory.h"
 
 aica_state_t g_aica_state = {
     .dynamic_base = 0,
     .dynamic_cursor = 0,
 };
 
-#define AFX_FREE_BLOCK_CAPACITY 128u
-#define AFX_SAMPLE_HANDLE_CAPACITY 64u
-#define AFX_AFX_ALLOC_CAPACITY 128u
+#define AFX_FREE_BLOCK_CAPACITY 512u
+#define AFX_SAMPLE_HANDLE_CAPACITY 256u
+#define AFX_AFX_ALLOC_CAPACITY 512u
+#define AFX_ALLOC_BLOCK_CAPACITY 512u
 
 #define drv_state_ptr                                                          \
   ((volatile afx_driver_state_t *)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR))
@@ -25,6 +29,11 @@ typedef struct {
 } afx_free_block_t;
 
 typedef struct {
+  uint32_t addr;
+  uint32_t size;
+} afx_alloc_block_t;
+
+typedef struct {
   bool in_use;
   uint16_t generation;
   afx_sample_info_t info;
@@ -32,6 +41,8 @@ typedef struct {
 
 static afx_free_block_t g_free_blocks[AFX_FREE_BLOCK_CAPACITY];
 static uint32_t g_free_block_count = 0;
+static afx_alloc_block_t g_alloc_blocks[AFX_ALLOC_BLOCK_CAPACITY];
+static uint32_t g_alloc_block_count = 0;
 static afx_sample_slot_t g_sample_slots[AFX_SAMPLE_HANDLE_CAPACITY];
 static afx_free_block_t g_afx_allocs[AFX_AFX_ALLOC_CAPACITY];
 static uint32_t g_afx_alloc_count = 0;
@@ -41,6 +52,8 @@ static void reset_sample_slots(void) {
   memset(g_sample_slots, 0, sizeof(g_sample_slots));
   memset(g_afx_allocs, 0, sizeof(g_afx_allocs));
   g_afx_alloc_count = 0;
+  memset(g_alloc_blocks, 0, sizeof(g_alloc_blocks));
+  g_alloc_block_count = 0;
 }
 
 static void reset_free_list(uint32_t dynamic_base) {
@@ -143,6 +156,15 @@ static bool resolve_sample_handle(uint32_t handle, uint32_t *slot_idx_out) {
   return true;
 }
 
+
+const unsigned char *afx_get_driver_blob() {
+  return afx_driver_data;
+}
+const int afx_get_driver_blob_size(){
+  return afx_driver_size;
+}
+
+
 void afx_mem_reset(uint32_t dynamic_base) {
   g_aica_state.dynamic_base = dynamic_base;
   g_aica_state.dynamic_cursor = dynamic_base;
@@ -155,6 +177,16 @@ uint32_t afx_mem_alloc(uint32_t size, uint32_t align) {
     return 0;
 
   uint32_t use_align = (align == 0) ? 32u : align;
+  
+  // Align requested size up to avoid tiny fragments and ensure sizes
+  // consume at least up to the alignment threshold.
+  size = align_up_u32(size, use_align);
+
+  uint32_t best_idx = UINT32_MAX;
+  uint32_t best_remain = UINT32_MAX;
+  uint32_t best_start = 0;
+  uint32_t best_pad = 0;
+
   for (uint32_t i = 0; i < g_free_block_count; i++) {
     afx_free_block_t block = g_free_blocks[i];
     uint32_t start = align_up_u32(block.addr, use_align);
@@ -167,44 +199,85 @@ uint32_t afx_mem_alloc(uint32_t size, uint32_t align) {
     if (size > (block.size - pad))
       continue;
 
-    uint32_t used = pad + size;
-    uint32_t remain = block.size - used;
-    uint32_t end = start + size;
-    if (end < start)
-      return 0;
-
-    if (pad == 0 && remain == 0) {
-      for (uint32_t j = i; j + 1u < g_free_block_count; j++) {
-        g_free_blocks[j] = g_free_blocks[j + 1u];
-      }
-      g_free_block_count--;
-    } else if (pad == 0) {
-      g_free_blocks[i].addr = end;
-      g_free_blocks[i].size = remain;
-    } else if (remain == 0) {
-      g_free_blocks[i].size = pad;
-    } else {
-      if (g_free_block_count >= AFX_FREE_BLOCK_CAPACITY)
-        return 0;
-      for (uint32_t j = g_free_block_count; j > (i + 1u); j--) {
-        g_free_blocks[j] = g_free_blocks[j - 1u];
-      }
-      g_free_blocks[i].size = pad;
-      g_free_blocks[i + 1u].addr = end;
-      g_free_blocks[i + 1u].size = remain;
-      g_free_block_count++;
+    uint32_t remain = block.size - (pad + size);
+    
+    // Choose the block that leaves the smallest remaining space
+    if (remain < best_remain) {
+      best_remain = remain;
+      best_idx = i;
+      best_start = start;
+      best_pad = pad;
     }
-
-    if (end > g_aica_state.dynamic_cursor) {
-      g_aica_state.dynamic_cursor = end;
-    }
-    return start;
   }
 
-  return 0;
+  if (best_idx == UINT32_MAX)
+    return 0;
+
+  uint32_t i = best_idx;
+  uint32_t start = best_start;
+  uint32_t pad = best_pad;
+  uint32_t remain = best_remain;
+
+  // We no longer absorb small padding by breaking alignment since
+  // size is now strictly aligned up to use_align. If tiny trailing remainders
+  // occur, absorb them into the end of the block.
+  if (remain > 0 && remain < use_align) {
+    size += remain;
+    remain = 0;
+  }
+
+  uint32_t end = start + size;
+
+  if (pad == 0 && remain == 0) {
+    for (uint32_t j = i; j + 1u < g_free_block_count; j++) {
+      g_free_blocks[j] = g_free_blocks[j + 1u];
+    }
+    g_free_block_count--;
+  } else if (pad == 0) {
+    g_free_blocks[i].addr = end;
+    g_free_blocks[i].size = remain;
+  } else if (remain == 0) {
+    g_free_blocks[i].size = pad;
+  } else {
+    if (g_free_block_count >= AFX_FREE_BLOCK_CAPACITY)
+      return 0;
+    for (uint32_t j = g_free_block_count; j > (i + 1u); j--) {
+      g_free_blocks[j] = g_free_blocks[j - 1u];
+    }
+    g_free_blocks[i].size = pad;
+    g_free_blocks[i + 1u].addr = end;
+    g_free_blocks[i + 1u].size = remain;
+    g_free_block_count++;
+  }
+
+  if (end > g_aica_state.dynamic_cursor) {
+    g_aica_state.dynamic_cursor = end;
+  }
+
+  if (g_alloc_block_count < AFX_ALLOC_BLOCK_CAPACITY) {
+    g_alloc_blocks[g_alloc_block_count].addr = start;
+    g_alloc_blocks[g_alloc_block_count].size = size;
+    g_alloc_block_count++;
+  }
+
+  return start;
 }
 
-bool afx_mem_free(uint32_t spu_addr, uint32_t size) {
+bool afx_mem_free(uint32_t spu_addr) {
+  uint32_t size = 0;
+  for (uint32_t i = 0; i < g_alloc_block_count; i++) {
+    if (g_alloc_blocks[i].addr == spu_addr) {
+      size = g_alloc_blocks[i].size;
+      for (uint32_t j = i; j + 1u < g_alloc_block_count; j++) {
+        g_alloc_blocks[j] = g_alloc_blocks[j + 1u];
+      }
+      g_alloc_block_count--;
+      break;
+    }
+  }
+
+  if (size == 0) return false;
+
   return insert_free_block_sorted(spu_addr, size);
 }
 
@@ -217,6 +290,13 @@ bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size) {
   return true;
 }
 
+uint32_t afx_mem_available(){
+  uint32_t available = 0;
+  for (uint32_t i = 0; i < g_free_block_count; i++) {
+    available += g_free_blocks[i].size;
+  }
+  return available;
+}
 
 uint32_t afx_sample_get_spu_addr(uint32_t sample_handle) {
   uint32_t slot_idx = 0;
@@ -242,7 +322,7 @@ bool afx_sample_free(uint32_t sample_handle) {
     return false;
 
   afx_sample_slot_t *slot = &g_sample_slots[slot_idx];
-  if (!afx_mem_free(slot->info.spu_addr, slot->info.length))
+  if (!afx_mem_free(slot->info.spu_addr))
     return false;
 
   slot->in_use = false;
@@ -275,7 +355,7 @@ uint32_t afx_sample_upload(const char *buf, size_t len, uint32_t rate,
   if (spu_addr == 0)
     return 0;
   if (!afx_mem_write(spu_addr, buf, sample_size)) {
-    (void)afx_mem_free(spu_addr, sample_size);
+    (void)afx_mem_free(spu_addr);
     return 0;
   }
 
@@ -306,7 +386,7 @@ uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size) {
   if (spu_addr == 0)
     return 0;
   if (!afx_mem_write(spu_addr, afx_data, afx_size)) {
-    (void)afx_mem_free(spu_addr, afx_size);
+    (void)afx_mem_free(spu_addr);
     return 0;
   }
   g_afx_allocs[g_afx_alloc_count].addr = spu_addr;
@@ -323,7 +403,7 @@ bool afx_free_afx(uint32_t spu_addr) {
         g_afx_allocs[j] = g_afx_allocs[j + 1u];
       }
       g_afx_alloc_count--;
-      return afx_mem_free(spu_addr, size);
+      return afx_mem_free(spu_addr);
     }
   }
   return false;

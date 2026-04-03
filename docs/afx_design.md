@@ -25,49 +25,54 @@ The result is a flow-command architecture where the runtime is deterministic and
 
 Current layout constants (from `include/afx/common.h` and `driver.h`):
 
-- `AFX_MEM_CLOCKS = 0x001FFFE0`
-- `AFX_IPC_STATUS_ADDR = 0x001FFFC0` (`sizeof(afx_ipc_status_t)=32`, aligned)
-- `AFX_IPC_CMD_QUEUE_ADDR = 0x001FFBC0` (`AFX_IPC_QUEUE_SZ=0x0400`)
-- `AFX_DRIVER_STATE_ADDR = 0x001FF980` (`sizeof(afx_driver_state_t)=268`, aligned down to 32-byte boundary)
+- `AFX_MEM_CLOCKS = (0x00200000 - 32)`
+- `AFX_DRIVER_STATE_ADDR = ((AFX_MEM_CLOCKS - sizeof(afx_driver_state_t)) & ~31)`
 
-Addresses are derived by macros, not hardcoded constants:
-- `AFX_IPC_STATUS_ADDR = ((AFX_MEM_CLOCKS - sizeof(afx_ipc_status_t)) & ~31)`
-- `AFX_IPC_CMD_QUEUE_ADDR = (AFX_IPC_STATUS_ADDR - AFX_IPC_QUEUE_SZ)`
-- `AFX_DRIVER_STATE_ADDR = ((AFX_IPC_CMD_QUEUE_ADDR - sizeof(afx_driver_state_t)) & ~31)`
+Addresses are derived by macros, mapped dynamically, and use 32-byte aligned structures (`afx_flow_state_t`, `afx_ipc_cmd_t`). The firmware bypasses KallistiOS sound elements entirely.
 
-The SH4 side owns dynamic allocation in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime state in `afx_driver_state_t` at a fixed high-memory address. This struct includes a small reserved stack for the ARM7 compiler to use for local variables and spills, protected by a 32-bit canary.
+The SH4 side owns dynamic allocation via Store Queues (`spu_memload_sq` for required 32-byte alignment robustness) in low/mid SPU RAM and uploads full `.afx` files. The ARM7 driver reads the uploaded header in-place and maintains runtime states in `afx_driver_state_t` (`AFX_DRIVER_STATE_ADDR`). This struct includes a small reserved stack for the ARM7 compiler `mini_stack[64]` protected by a 32-bit canary `stack_canary`.
 
 ```mermaid
 graph TD
-    subgraph AICA_RAM ["AICA 2-Megabyte RAM Stack"]
+    subgraph AICA_RAM ["AICA 2-Megabyte RAM"]
         direction TB
 
-        CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
-
-        subgraph IPC_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FF980 - 0x001FFFE0"]
+        subgraph CONTROL_BLOCK ["<b>Control Block (High RAM)</b><br/>0x001FF780 - 0x001FFFFF (2175 bytes)"]
             direction TB
-            STATUS["<b>IPC Status Struct</b><br/>0x001FFFC0 - 0x001FFFDF<br/>(afx_ipc_status_t, 32 bytes)"]
-            QUEUE["<b>Command Queue</b><br/>0x001FFBC0 - 0x001FFFBF<br/>(0x0400 bytes)"]
-            PLAYER["<b>Driver State & Stack</b><br/>0x001FF980 - 0x001FFA8B<br/>(afx_driver_state_t, 268 bytes)"]
-            STATUS --- QUEUE
-            QUEUE --- PLAYER
+            
+            CLOCKS["<b>Hardware Timers / Clocks</b><br/>0x001FFFE0 - 0x001FFFFF<br/>(32 bytes)"]
+            
+            subgraph DRIVER_STATE ["<b>afx_driver_state_t</b><br/>0x001FF780 - 0x001FFFDF"]
+                direction TB
+                FLOWS["<b>afx_flow_state_t flows[64]</b><br/>0x001FF9C8 (2048 bytes)"]
+                ARENAS["<b>chan_arenas[5][64]</b><br/>0x001FF888 (320 bytes)"]
+                STATUS["<b>Driver Flags / Status</b><br/>0x001FF884 (4 bytes)"]
+                STACK["<b>mini_stack[64]</b><br/>0x001FF784 (256 bytes)"]
+                CANARY["<b>stack_canary</b><br/>0x001FF780 (4 bytes)"]
+
+                FLOWS --- ARENAS
+                ARENAS --- STATUS
+                STATUS --- STACK
+                STACK --- CANARY
+            end
+
+            CLOCKS --- DRIVER_STATE
         end
 
-        CLOCKS --- IPC_BLOCK
-        IPC_BLOCK --- DYNAMIC
-        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FF97F"]
+        CONTROL_BLOCK --- DYNAMIC
+        DYNAMIC["<b>Dynamic Upload Area (SH4-managed)</b><br/>0x00002000 - 0x001FF77F"]
         DYNAMIC --- DRIVER
-        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 ~2KB"]
+        DRIVER["<b>Driver Payload (ARM7)</b><br/>0x00000000 - 0x00000758 (<2KB)"]
     end
 ```
 
 
-## Binary Layout
+## Aicaflow Binary Layout
 
 ```
-[afx_header_t]             - 20-byte lean header
-[afx_section_entry_t[]]    - implicit directory table (immediately follows header)
-[FLOW]                     - array of afx_cmd_t
+[afx_header_t]             - 24-byte header (includes FLOW offset)
+[afx_section_entry_t[]]    - optional sections table (immediately follows header)
+[FLOW]                     - mandatory array of afx_cmd_t
 [SDES]                     - array of afx_sample_desc_t
 [META]                     - optional afx_meta_t metadata block
 [SDAT]                     - raw ADPCM/PCM bytes
@@ -88,12 +93,15 @@ All section offsets are relative to file start.
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    uint32_t section_count;
+    uint32_t flow_offset;      // Mandatory FLOW section start
+    uint32_t flow_size;        // Mandatory FLOW section size
     uint32_t total_ticks;      // total duration in ms
-    uint32_t flags;
+    uint8_t section_count;     // number of optional sections
+    uint8_t required_channels; 
+    uint16_t flags;
 } afx_header_t;
 
-/* Section table immediately follows header at offset 20 */
+/* Section table immediately follows header at offset 24 */
 typedef struct {
     uint32_t id;               // AFX_SECT_* fourcc
     uint32_t offset;           // file-relative byte offset
@@ -102,7 +110,7 @@ typedef struct {
     uint32_t align;            // alignment (4 or 32)
     uint32_t flags;
 } afx_section_entry_t;
-```
+```,oldString:
 
 ### Sample Descriptor (`afx_sample_desc_t`)
 

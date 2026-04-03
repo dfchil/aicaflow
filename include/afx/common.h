@@ -20,7 +20,6 @@
 #define AFX_ALIGN32(v) (((v) + 31u) & ~31u)
 
 /* Section IDs (ASCII 4CC stored in little-endian uint32) */
-#define AFX_SECT_FLOW 0x574F4C46u /* 'FLOW' */
 #define AFX_SECT_SDES 0x53454453u /* 'SDES' sample descriptors */
 #define AFX_SECT_SDAT 0x54414453u /* 'SDAT' sample data */
 #define AFX_SECT_DSPM 0x4D505344u /* 'DSPM' DSP code */
@@ -69,17 +68,19 @@
 
 /* .afx file header */
 typedef struct {
-  uint32_t magic;       /* AICAF_MAGIC */
-  uint32_t version;     /* AICAF_VERSION */
+  uint32_t magic;      /* AICAF_MAGIC */
+  uint32_t version;    /* AICAF_VERSION */
+  uint32_t flow_offset; /* File-relative offset to flow commands (MANDATORY) */
+  uint32_t flow_size;   /* Size of flow section in bytes */
   uint32_t total_ticks; /* Total song duration in ms */
   uint8_t
-      section_count; /* Number of sections immediately following this header */
+      section_count; /* Number of OPTIONAL sections following this header */
   uint8_t
       required_channels; /* Peak channels needed by song playback, mandatory */
   uint16_t flags;        /* Reserved */
 } afx_header_t;
 
-_Static_assert(sizeof(afx_header_t) == 16u, "afx_header_t size mismatch");
+_Static_assert(sizeof(afx_header_t) == 24u, "afx_header_t size updated");
 
 /* Section table entry */
 typedef struct {
@@ -91,7 +92,7 @@ typedef struct {
   uint32_t flags;  /* reserved */
 } afx_section_entry_t;
 
-/* Sample descriptor (32 bytes) */
+/* Sample descriptor*/
 typedef struct {
   uint32_t source_id; /* hash of originating WAV */
   uint8_t gm_program; /* GM program number */

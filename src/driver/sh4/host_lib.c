@@ -1,7 +1,6 @@
-#include <afx/bin/driver_blob.h>
+#include <afx/channels.h>
 #include <afx/host.h>
 #include <afx/memory.h>
-#include <afx/channels.h>
 #include <kos.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -16,13 +15,17 @@
 #include <dc/spu.h>
 #endif
 
-#define AICA_CLOCK_ADDR 0x001FFFE0 /* Reserve uppermost 4 words for clock registers */
+#define AICA_CLOCK_ADDR                                                        \
+  0x001FFFE0 /* Reserve uppermost 4 words for clock registers */
 
-#define AICA_HW_CLOCK      ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR))
-#define AICA_PREV_HW_CLOCK ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 4))
-#define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 8))
-#define AICA_CMD_COUNT ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 12))
-
+#define AICA_HW_CLOCK                                                          \
+  ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR))
+#define AICA_PREV_HW_CLOCK                                                     \
+  ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 4))
+#define AICA_VIRTUAL_CLOCK                                                     \
+  ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 8))
+#define AICA_CMD_COUNT                                                         \
+  ((volatile uint32_t *)(SPU_RAM_BASE_SH4 + AICA_CLOCK_ADDR + 12))
 
 #define AICA_DSP_COEF_ADDR 0x00801000u
 #define AICA_DSP_MPRO_ADDR 0x00803000u
@@ -34,13 +37,14 @@
 #define drv_state_ptr                                                          \
   ((volatile afx_driver_state_t *)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR))
 
-
-static const afx_section_entry_t* find_afx_section(const afx_header_t* hdr,
+static const afx_section_entry_t *find_afx_section(const afx_header_t *hdr,
                                                    uint32_t section_id) {
-  if (!hdr) return NULL;
-  const afx_section_entry_t* sections = (const afx_section_entry_t*)(hdr + 1);
+  if (!hdr)
+    return NULL;
+  const afx_section_entry_t *sections = (const afx_section_entry_t *)(hdr + 1);
   for (uint32_t i = 0; i < hdr->section_count; i++) {
-    if (sections[i].id == section_id) return &sections[i];
+    if (sections[i].id == section_id)
+      return &sections[i];
   }
   return NULL;
 }
@@ -102,52 +106,32 @@ uint32_t afx_create_tl_scale_lut(uint8_t volume) {
   return afx_upload_tl_scale_lut(lut);
 }
 
-void aica_shutdown(void) {
-  // 1. Halt AICA ARM7 CPU
-  AICA_ARM_EN_REG = AICA_ARM_EN_REG | 1u;
-
-  // 2. Reset the AICA Hardware state from the SH-4 side
-  // We clear the channel registers to stop all sound immediately
-  volatile uint32_t *aica_reg = (volatile uint32_t *)SPU_RAM_BASE_SH4;
-  for (int i = 0; i < 64; i++) {
-    volatile uint32_t *slot =
-        (volatile uint32_t *)((uint8_t *)aica_reg + (i * 128));
-    slot[0] = 0x8000;
-    for (int j = 1; j < 32; j++)
-      slot[j] = 0;
-  }
-}
-
 bool afx_init(void) {
   G2_WAIT_REG = 0x1f;
 
-  aica_shutdown();
+  spu_disable();
 
-  const void *fw_data = afx_driver_data;
-  uint32_t fw_size = (uint32_t)afx_driver_size;
-
-  uint32_t fw_spu_addr = 0;
-  uint32_t marker_addr = fw_spu_addr + fw_size;
+  const uint32_t fw_spu_addr = 0;
+  const uint32_t marker_addr = fw_spu_addr + afx_get_driver_blob_size();
   if (marker_addr < fw_spu_addr)
     return false;
 
-  if (!range_fits_dynamic(fw_spu_addr, fw_size + sizeof(uint32_t)))
+  if (!range_fits_dynamic(fw_spu_addr,
+                          afx_get_driver_blob_size() + sizeof(uint32_t)))
     return false;
 
-  spu_memload(fw_spu_addr, (void*)fw_data, fw_size);
+  spu_memload(fw_spu_addr, (void *)afx_get_driver_blob(),
+              afx_get_driver_blob_size());
 
-  uint32_t dynamic_base = align_up_u32(marker_addr + sizeof(uint32_t), 32);
+  uint32_t dynamic_base = align_up_u32(marker_addr, 32);
   if (dynamic_base >= AFX_DRIVER_STATE_ADDR)
     return false;
-
   memset((void *)(uintptr_t)(SPU_RAM_BASE_SH4 + AFX_DRIVER_STATE_ADDR), 0,
          sizeof(afx_driver_state_t));
 
   afx_mem_reset(dynamic_base);
 
-  /* Halt then re-enable ARM7 so it boots from the freshly uploaded firmware */
-  // 5. Restart ARM7 CPU
-  AICA_ARM_EN_REG = AICA_ARM_EN_REG & ~1;
+  spu_enable();
 
   /* Poll for ARM7 ready signal; spin up to ~200ms worth of iterations */
   uint32_t timeout = 0x800000u;
@@ -169,11 +153,12 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
         (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
                                           flow_state->afx_base);
     for (uint32_t ch = 0; ch < hdr->required_channels; ch++) {
-      uint8_t hw_ch = ((uint8_t*)flow_state->channel_map)[ch];
+      uint8_t hw_ch = ((uint8_t *)flow_state->channel_map)[ch];
       mask |= (1ULL << hw_ch);
     }
     afx_channels_release(mask);
-    afx_channel_release_mapping(hdr->required_channels, flow_state->channel_map);
+    afx_channel_release_mapping(hdr->required_channels,
+                                flow_state->channel_map);
 
     if (slot == drv_state_ptr->flow_count_active - 1) {
       /* Simple case: just decrement active count to retire the last slot */
@@ -217,27 +202,32 @@ static uint8_t afx_state_allocate_flow_slot(uint8_t num_channels) {
   return slot;
 }
 
-void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, const char* label) {
+void afx_driver_state_info(const volatile afx_driver_state_t *driver_state,
+                           const char *label) {
   if (!driver_state) {
     printf("[AFX] afx_driver_state_info: driver_state is NULL\n");
     return;
   }
 
-  const char *flow_status_names[] = {
-      "AFX_FLOW_STOPPED", "AFX_FLOW_PLAYING", 
-      "AFX_FLOW_PAUSED", "AFX_FLOW_RETIRED", "AFX_FLOW_AVAILABLE"};
+  const char *flow_status_names[] = {"AFX_FLOW_STOPPED", "AFX_FLOW_PLAYING",
+                                     "AFX_FLOW_PAUSED", "AFX_FLOW_RETIRED",
+                                     "AFX_FLOW_AVAILABLE"};
 
   uint32_t hw_clock = *AICA_HW_CLOCK;
   uint32_t prev_hw_clock = *AICA_PREV_HW_CLOCK;
   uint32_t virtual_clock = *AICA_VIRTUAL_CLOCK;
   uint32_t cmd_count = *AICA_CMD_COUNT;
 
-  printf("[AFX] driver state @%s %p\n", label ? label : "", (const void *)driver_state);
-  printf("[AFX]  stack_canary = 0x%08X\n", (unsigned)driver_state->stack_canary);
-  printf("[AFX]  flow_count_active = %u\n", (unsigned)driver_state->flow_count_active);
+  printf("[AFX] driver state @%s %p\n", label ? label : "",
+         (const void *)driver_state);
+  printf("[AFX]  stack_canary = 0x%08X\n",
+         (unsigned)driver_state->stack_canary);
+  printf("[AFX]  flow_count_active = %u\n",
+         (unsigned)driver_state->flow_count_active);
   printf("[AFX]  AICA_CMD_COUNT = %u\n", (unsigned)cmd_count);
   printf("[AFX]  arm_status = %u\n", (unsigned)driver_state->arm_status);
-  printf("[AFX]  HW clock = %lu, prev = %lu, virtual = %lu\n", hw_clock, prev_hw_clock, virtual_clock);
+  printf("[AFX]  HW clock = %lu, prev = %lu, virtual = %lu\n", hw_clock,
+         prev_hw_clock, virtual_clock);
 
   for (uint32_t i = 0; i < 5; i++) {
     const volatile afx_flow_state_t *f = &driver_state->flow_states[i];
@@ -255,16 +245,17 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
     if (f->afx_base != 0) {
       const afx_header_t *hdr =
           (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + f->afx_base);
-      const afx_section_entry_t *flow_sect = find_afx_section(hdr, AFX_SECT_FLOW);
-      if (hdr && flow_sect) {
+      if (hdr) {
         required_channels = hdr->required_channels;
         total_ticks = hdr->total_ticks;
-        flow_section_size = flow_sect->size;
+        flow_section_size = hdr->flow_size;
         if (total_ticks > 0) {
-          tick_progress = (uint32_t)((uint64_t)f->next_event_tick * 100 / total_ticks);
+          tick_progress =
+              (uint32_t)((uint64_t)f->next_event_tick * 100 / total_ticks);
         }
         if (flow_section_size > 0) {
-          flow_progress = (uint32_t)((uint64_t)f->flow_offset * 100 / flow_section_size);
+          flow_progress =
+              (uint32_t)((uint64_t)f->flow_offset * 100 / flow_section_size);
         }
       }
     }
@@ -273,42 +264,33 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state, cons
     channel_map_str[0] = '\0';
     size_t cm_len = 0;
     cm_len += snprintf(channel_map_str + cm_len,
-                       sizeof(channel_map_str) - cm_len,
-                       "[");
+                       sizeof(channel_map_str) - cm_len, "[");
     for (uint32_t ch = 0; ch < required_channels; ch++) {
-      uint32_t hw = ((uint8_t*)f->channel_map)[ch];
+      uint32_t hw = ((uint8_t *)f->channel_map)[ch];
       if (hw != AFX_FLOW_CHANNEL_MAP_INVALID) {
         cm_len += snprintf(channel_map_str + cm_len,
-                           sizeof(channel_map_str) - cm_len,
-                           "%s%u->%u", cm_len > 1 ? "," : "", (unsigned)ch,
-                           (unsigned)hw);
-        if (cm_len >= sizeof(channel_map_str) - 1) break;
+                           sizeof(channel_map_str) - cm_len, "%s%u->%u",
+                           cm_len > 1 ? "," : "", (unsigned)ch, (unsigned)hw);
+        if (cm_len >= sizeof(channel_map_str) - 1)
+          break;
       }
     }
     if (cm_len < sizeof(channel_map_str) - 1)
-      snprintf(channel_map_str + cm_len,
-               sizeof(channel_map_str) - cm_len,
-               "]");
+      snprintf(channel_map_str + cm_len, sizeof(channel_map_str) - cm_len, "]");
     else
       channel_map_str[sizeof(channel_map_str) - 1] = '\0';
 
-    printf("[AFX]  flow_slot %02u: status=%s (raw=%u), afx_base=0x%08X, flow_ptr=0x%08X, flow_offset=%u/%u (%u%%), tick_adjust=%u, next_event_tick=%u/%u (%u%%), tl_lut=0x%08X, sample_addr_mode=%u, map=%s\n",
-           (unsigned)i,
-           status,
-           (unsigned)f->status,
-           (unsigned)f->afx_base,
-           (unsigned)f->flow_ptr,
-           (unsigned)f->flow_offset,
-           (unsigned)flow_section_size,
-           (unsigned)flow_progress,
-           (unsigned)f->tick_adjust,
-           (unsigned)f->next_event_tick,
-           (unsigned)total_ticks,
-           (unsigned)tick_progress,
-           (unsigned)f->tl_scale_lut_ptr,
-           (unsigned)f->sample_addr_mode,
-            channel_map_str
-          );
+    printf("[AFX]  flow_slot %02u: status=%s (raw=%u), afx_base=0x%08X, "
+           "flow_ptr=0x%08X, flow_offset=%u/%u (%u%%), tick_adjust=%u, "
+           "next_event_tick=%u/%u (%u%%), tl_lut=0x%08X, sample_addr_mode=%u, "
+           "map=%s\n",
+           (unsigned)i, status, (unsigned)f->status, (unsigned)f->afx_base,
+           (unsigned)f->flow_ptr, (unsigned)f->flow_offset,
+           (unsigned)flow_section_size, (unsigned)flow_progress,
+           (unsigned)f->tick_adjust, (unsigned)f->next_event_tick,
+           (unsigned)total_ticks, (unsigned)tick_progress,
+           (unsigned)f->tl_scale_lut_ptr, (unsigned)f->sample_addr_mode,
+           channel_map_str);
   }
 }
 
@@ -340,7 +322,7 @@ bool afx_flow_deactivate(uint8_t flow_slot) {
  * */
 uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
 
-  if (flow_spu_addr == 0)
+  if (flow_spu_addr == 0 || flow_spu_addr > AFX_DRIVER_STATE_ADDR)
     return 0xFFu;
   if (drv_state_ptr->flow_count_active >= AFX_FLOW_POOL_CAPACITY) {
     return 0xFFu;
@@ -353,9 +335,6 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
 
   const bool uses_external_samples =
       (hdr->flags & AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS) != 0u;
-  const afx_section_entry_t *flow_sect = find_afx_section(hdr, AFX_SECT_FLOW);
-  if (!flow_sect)
-    return 0xFFu;
   const afx_section_entry_t *sdat_sect = find_afx_section(hdr, AFX_SECT_SDAT);
   if (!uses_external_samples && !sdat_sect)
     return 0xFFu;
@@ -373,40 +352,60 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
   if (channel_mask == 0)
     return 0xFFu;
 
-  afx_flow_state_t flow_template;
+  alignas(32) afx_flow_state_t flow_template;
   memset(&flow_template, 0, sizeof(flow_template));
-  flow_template.channel_map = afx_channel_setup_mapping(required_channels, channel_mask);
+  flow_template.channel_map =
+      afx_channel_setup_mapping(required_channels, channel_mask);
   flow_template.afx_base = flow_spu_addr;
-  flow_template.flow_ptr = flow_spu_addr + flow_sect->offset;
+  flow_template.flow_ptr = flow_spu_addr + hdr->flow_offset;
   flow_template.flow_offset = 0;
   flow_template.next_event_tick = 0;
   flow_template.sample_addr_mode = uses_external_samples;
   flow_template.status = AFX_FLOW_STOPPED;
 
-  drv_state_ptr->flow_states[flow_slot] = flow_template;
+  afx_driver_state_t *local_copy = drv_state_ptr;
+
+  g2_write_block_8((uint8_t *)&flow_template,(uintptr_t)
+                   (&local_copy->flow_states[flow_slot] - SPU_RAM_BASE_SH4),
+                   sizeof(afx_flow_state_t));
   return flow_slot;
 }
 
 bool afx_flow_set_tl_scale_lut(uint8_t flow_slot, uint32_t lut_spu_addr) {
-//   uint32_t flow_addr = drv_state_ptr->flow_states[flow_slot].afx_base +
-//                        offsetof(afx_flow_state_t, tl_scale_lut_ptr);
-//   if (flow_addr == 0)
-//     return false;
+  //   uint32_t flow_addr = drv_state_ptr->flow_states[flow_slot].afx_base +
+  //                        offsetof(afx_flow_state_t, tl_scale_lut_ptr);
+  //   if (flow_addr == 0)
+  //     return false;
 
-//   uint32_t field_addr =
-//       flow_addr + (uint32_t)offsetof(afx_flow_state_t, tl_scale_lut_ptr);
-//   return afx_mem_write(field_addr, &lut_spu_addr, sizeof(lut_spu_addr));
-    return true;
+  //   uint32_t field_addr =
+  //       flow_addr + (uint32_t)offsetof(afx_flow_state_t, tl_scale_lut_ptr);
+  //   return afx_mem_write(field_addr, &lut_spu_addr, sizeof(lut_spu_addr));
+  return true;
 }
 
 void afx_flow_play(uint8_t flow_slot) {
   if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
     return;
 
-  volatile afx_flow_state_t *flow_state = &drv_state_ptr->flow_states[flow_slot];
-  if (flow_state->afx_base != 0) {
-    apply_song_dsp_sections_host(flow_state->afx_base);
+  volatile afx_flow_state_t *flow_state =
+      &drv_state_ptr->flow_states[flow_slot];
+  volatile afx_driver_state_t *driver = drv_state_ptr;
+  const afx_header_t *hdr =
+      driver->flow_states[flow_slot].afx_base != 0
+          ? (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
+                                              flow_state->afx_base)
+          : NULL;
+
+  if (hdr && hdr->magic != AICAF_MAGIC) {
+    printf("[SFX] invalid flow in slot %d: magic=0x%08X\n", flow_slot,
+           hdr->magic);
+    return;
   }
+
+  // if (flow_state->afx_base != 0) {  // this is pretty wrong TODO: investigate
+  // why this check was here and if it can be removed
+  //   apply_song_dsp_sections_host(flow_state->afx_base);
+  // }
 
   // If this is a fresh play (or after stop), reset playback pointers.
   if (flow_state->status != AFX_FLOW_PAUSED) {
@@ -426,11 +425,13 @@ void afx_flow_resume(uint8_t flow_slot) {
   if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
     return;
 
-  volatile afx_flow_state_t *flow_state = &drv_state_ptr->flow_states[flow_slot];
+  volatile afx_flow_state_t *flow_state =
+      &drv_state_ptr->flow_states[flow_slot];
   if (flow_state->status != AFX_FLOW_PAUSED)
     return;
 
-  // Rebase tick_adjust so playback resumes from paused next_event_tick at current wall-clock time.
+  // Rebase tick_adjust so playback resumes from paused next_event_tick at
+  // current wall-clock time.
   uint32_t paused_next_tick = flow_state->next_event_tick;
   flow_state->tick_adjust = *AICA_VIRTUAL_CLOCK - paused_next_tick;
   flow_state->status = AFX_FLOW_PLAYING;
@@ -450,14 +451,11 @@ void afx_flow_seek(uint8_t flow_slot, uint32_t tick_ms) {
   volatile afx_flow_state_t *flow = drv_state_ptr->flow_states + flow_slot;
   const afx_header_t *hdr =
       (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + flow->afx_base);
-  const volatile afx_section_entry_t *flow_sect =
-      find_afx_section(hdr, AFX_SECT_FLOW);
-  if (!flow_sect)
+  if (!hdr)
     return;
 
-  uint32_t flow_offset =
-      afx_cmd_lower_bound_by_offset((const uint8_t *)flow->flow_ptr,
-                                    flow_sect->size, flow_sect->count, tick_ms);
+  uint32_t flow_offset = afx_cmd_lower_bound_by_offset(
+      (const uint8_t *)flow->flow_ptr, hdr->flow_size, 0, tick_ms);
 
   flow->flow_offset = flow_offset;
   flow->next_event_tick = tick_ms;

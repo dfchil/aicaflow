@@ -133,9 +133,11 @@ The SH4/ARM7 IPC interface currently supports:
 - `VOLUME`
 - `SEEK`
 
-Control commands are transported over a ring queue in AICA RAM (`AFX_IPC_CMD_QUEUE_ADDR`) with SH4 as producer and ARM7 as consumer.
+Control commands are transported over a queue in AICA RAM mapped dynamically via `AFX_DRIVER_STATE_ADDR` combined with shared states like `afx_flow_state_t` instead of hardcoded macros. SH4 uses `spu_memload_sq` (Store Queues) for fast, 32-byte aligned data uploads to ensure reliable SH4->ARM7 communication.
 
 For bring-up, SH4 can upload and initialize firmware with `afx_upload_and_init_firmware()`. This helper uses the default firmware load address, writes a 32-byte aligned dynamic-upload base marker immediately after the firmware image, and resets allocator state tracked in SH4-side `aica_state_t`.
 
-The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the flow-command stream: global total-level scaling for music volume (via a cached 256-entry TL lookup table rebuilt only on volume changes).
+The ARM7 driver remains intentionally simple: it advances a virtual clock, streams register writes, uploads optional DSP data at song start, and applies only one runtime transform to the flow-command stream: global total-level scaling for music volume.
+
+The codebase now uses a custom, bare-metal IPC design entirely bypassing KallistiOS sound components (no `snd_init()` or KOS memory arrays) for the queue. The driver dynamically reserves memory for `afx_driver_state_t` near the end of the 2MB AICA RAM.
 

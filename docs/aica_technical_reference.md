@@ -55,13 +55,12 @@ Generic guidance:
 
 Project suggestion (AICAFlow layout):
 - `0x001FFFE0 - 0x001FFFFF`: clock/timer mirror block (`AFX_MEM_CLOCKS`).
-- `0x001FFFC0 - 0x001FFFDF`: IPC status (`AFX_IPC_STATUS_ADDR`).
-- `0x001FFBC0 - 0x001FFFBF`: SH4->ARM7 ring queue (`AFX_IPC_CMD_QUEUE_ADDR`, `0x0400` bytes).
-- `0x001FFA60 - 0x001FFBB3`: driver runtime state (`AFX_DRIVER_STATE_ADDR`, `sizeof(afx_driver_state_t)=268`).
-- `0x00002000 - 0x001FFA5F`: SH4-managed dynamic upload area (full `.afx` payloads uploaded in-place).
-- `0x00000000 - 0x00001FFF`: ARM7 firmware payload + startup data.
+- Base Address: `AFX_DRIVER_STATE_ADDR` = `((AFX_MEM_CLOCKS - sizeof(afx_driver_state_t)) & ~31)`.
+- Runtime state: Dynamically mapped here, consisting of `afx_driver_state_t` (stack canary, mini stack, channel arenas, and an array of `afx_flow_state_t` for tracking up to 64 active stream flows).
+- `0x00002000 - 0x001FFxxx` (Up to `AFX_DRIVER_STATE_ADDR`): SH4-managed dynamic upload area via Store Queues (`spu_memload_sq` for 32-byte aligned operations). (Full `.afx` payloads uploaded in-place).
+- `0x00000000 - 0x00001FFF`: ARM7 firmware payload + startup data. No KallistiOS sound components (e.g. `snd_init`, KOS queues) are used.
 
-Note: these addresses are macro-derived from structure sizes and 32-byte alignment in `include/afx/driver.h`.
+Note: these addresses are macro-derived from structure sizes and 32-byte alignment in `include/afx/driver.h`, specifically `AFX_DRIVER_STATE_ADDR`.
 
 Samples should be aligned to at least 32-bit boundaries. ADPCM typically reduces sample footprint by about 50% compared to PCM16, with encode-side complexity and hardware decode at playback.
 

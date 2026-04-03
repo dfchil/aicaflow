@@ -15,6 +15,7 @@
 #define AICA_PREV_HW_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 4))
 #define AICA_VIRTUAL_CLOCK ((volatile uint32_t *)(AICA_CLOCK_ADDR + 8))
 #define AICA_CMD_COUNT ((volatile uint32_t *)(AICA_CLOCK_ADDR + 12))
+#define AICA_TOP_WORD ((volatile uint32_t *)0x001FFFFC) /* topmost word of 2MB AICA RAM */
 
 #define AICA_SGLT_LO ((volatile uint32_t *)AICA_SGLT_LO_ADDR)
 #define AICA_SGLT_HI ((volatile uint32_t *)AICA_SGLT_HI_ADDR)
@@ -117,10 +118,9 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
                                             uint32_t tick) {
   uint32_t offset = flow->flow_offset;
   const afx_header_t *hdr = (const afx_header_t *)(flow->afx_base);
-  const afx_section_entry_t *flow_sect = (const afx_section_entry_t*)(hdr + 1);
 
   uint32_t next_event_rel = 0;
-  while (offset < flow_sect->size) {
+  while (offset < hdr->flow_size) {
     const afx_cmd_t *cmd =
         (const afx_cmd_t *)(uintptr_t)(flow->flow_ptr + offset);
     uint32_t cmd_global_tick = cmd->timestamp + flow->tick_adjust;
@@ -139,17 +139,16 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
 
   flow->flow_offset = offset;
 
-  if (offset >= flow_sect->size) {
+  if (offset >= hdr->flow_size) {
     // Reached end of command stream; mark next_event_tick to emit as end.
     flow->next_event_tick = hdr->total_ticks;
-  } else {
-    flow->next_event_tick = next_event_rel;
   }
 
   return offset;
 }
 
-static inline void set_mini_stack(void) {
+
+void arm_main(void) {
   /* Initialize Stack Pointer (SP) to the top of our reserved mini_stack.
      - mini_stack is 64 words (256 bytes); stack grows downward on ARM.
      - So initial SP should be base + size (one-past-end of buffer).
@@ -159,10 +158,13 @@ static inline void set_mini_stack(void) {
                    :
                    : "r"(drv_state_ptr->mini_stack)
                    : "r0", "sp");
-}
 
-void arm_main(void) {
-  set_mini_stack();
+  __asm__ volatile(
+    "ldr r0, =0x00100000u\n"
+    "str sp, [r0]\n"
+    :
+    :
+    : "r0", "memory");
 
   drv_state_ptr->arm_status = 0;
   drv_state_ptr->flow_count_active = 0;

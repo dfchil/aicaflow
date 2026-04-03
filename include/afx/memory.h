@@ -6,9 +6,15 @@
 #include <afx/driver.h>
 #include <afx/host.h>
 
+
+const unsigned char *afx_get_driver_blob();
+const int afx_get_driver_blob_size();
+
 void afx_mem_reset(uint32_t dynamic_base);
 uint32_t afx_mem_alloc(uint32_t size, uint32_t align);
-bool afx_mem_free(uint32_t spu_addr, uint32_t size);
+bool afx_mem_free(uint32_t spu_addr);
+uint32_t afx_mem_available();
+
 bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size);
 
 uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size);

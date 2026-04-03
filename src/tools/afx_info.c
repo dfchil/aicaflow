@@ -128,33 +128,33 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const afx_section_entry_t *s_flow = NULL;
     const afx_section_entry_t *s_sdes = NULL;
     const afx_section_entry_t *s_sdat = NULL;
 
     for (uint32_t i = 0; i < head.section_count; i++) {
-        if (sections[i].id == AFX_SECT_FLOW) s_flow = &sections[i];
         if (sections[i].id == AFX_SECT_SDES) s_sdes = &sections[i];
         if (sections[i].id == AFX_SECT_SDAT) s_sdat = &sections[i];
     }
 
-    if (!s_flow || !s_sdes || !s_sdat) {
+    if (!s_sdes || !s_sdat) {
         fprintf(stderr, "Error: Missing required section(s).\n");
         free(sections);
         fclose(f);
         return 1;
     }
 
+    uint32_t flow_off         = head.flow_offset;
+    uint32_t flow_size        = head.flow_size;
     uint32_t sample_data_off  = s_sdat->offset;
     uint32_t sample_data_size = s_sdat->size;
     uint32_t source_map_off   = s_sdes->offset;
     uint32_t source_map_count = s_sdes->count;
-    uint32_t flow_data_off    = s_flow->offset;
-    uint32_t flow_data_size   = s_flow->size;
+    uint32_t flow_data_off    = flow_off;
+    uint32_t flow_data_size   = flow_size;
     uint32_t total_ticks      = head.total_ticks;
     uint32_t stored_required_channels = head.required_channels;
 
-    uint32_t flow_cmd_count = s_flow->count;
+    uint32_t flow_cmd_count = 0; /* No longer easily available without iterating stream */
     double sample_pct = (double)sample_data_size / total_size * 100.0;
     double flow_cmd_pct = (double)flow_data_size / total_size * 100.0;
 

@@ -25,10 +25,8 @@ typedef struct {
   uint8_t channels;
 } afx_sample_info_t;
 
-void aica_shutdown(void);
-
 uint32_t afx_mem_alloc(uint32_t size, uint32_t align);
-bool afx_mem_free(uint32_t spu_addr, uint32_t size);
+bool afx_mem_free(uint32_t spu_addr);
 bool afx_mem_write(uint32_t spu_addr, const void *src, uint32_t size);
 
 uint32_t afx_upload_afx(const void *afx_data, uint32_t afx_size);

@@ -897,14 +897,8 @@ int main(int argc, char **argv) {
     uint32_t cursor = sizeof(afx_header_t) + (uint32_t)(4 * sizeof(afx_section_entry_t));
     cursor = AFX_ALIGN32(cursor);
 
-    sections[section_count++] = (afx_section_entry_t){
-        .id = AFX_SECT_FLOW,
-        .offset = cursor,
-        .size = flow_stream_size,
-        .count = flow_op_count,
-        .align = 32,
-        .flags = 0,
-    };
+    header.flow_offset = cursor;
+    header.flow_size = flow_stream_size;
     cursor = AFX_ALIGN32(cursor + flow_stream_size);
 
     uint32_t sdes_bytes = source_count * (uint32_t)sizeof(afx_sample_desc_t);
@@ -940,14 +934,14 @@ int main(int argc, char **argv) {
 
     /* Padding to first section offset (usually 0x60) */
     long pos = ftell(f_out);
-    while ((uint32_t)pos < sections[0].offset) {
+    while ((uint32_t)pos < header.flow_offset) {
         fputc(0, f_out);
         pos++;
     }
 
     fwrite(sorted_flow, 1, flow_stream_size, f_out);
     pos = ftell(f_out);
-    while ((uint32_t)pos < sections[1].offset) {
+    while ((uint32_t)pos < sections[0].offset) {
         fputc(0, f_out);
         pos++;
     }
