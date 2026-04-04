@@ -290,56 +290,8 @@ Implemented host helpers:
 
 Firmware upload/init behavior:
 - upload firmware at SPU address 0x0
-- write 32-byte aligned dynamic-base marker immediately after firmware size
 - clear queue/player/status control blocks
-- initialize allocator cursor to computed dynamic base
-
----
-
-## Family Playback Policies (Current)
-
-Family policy metadata is generated into family map entries and consumed by converter.
-
-Applied during conversion:
-- note-off trim (`policy_note_trim_ms`) with min hold (`policy_min_hold_ms`)
-- velocity shaping (`policy_velocity_gamma`, `policy_velocity_gain`)
-- release-rate bias (`policy_release_bias`)
-
-This affects flow-command generation, not driver complexity.
-
----
-
-## What Has Been Done
-
-1. Stable header/descriptor/stream schema implemented in code
-2. DSP payload embedding and driver upload path implemented
-3. Global runtime music volume scaling on TOT_LVL implemented (LUT fast path)
-4. SH4-managed dynamic AICA upload helpers implemented
-5. Firmware upload/init helper with dynamic-base marker implemented
-6. IPC ring queue mechanism implemented (replacing single mailbox fields)
-7. Queue resized to a compact practical default (`0x0400`)
-8. Family patch workflow and policy-aware conversion implemented
-9. Coverage reports for family patch mapping implemented
-
----
-
-## What Still Needs To Be Done
-
-1. Queue robustness instrumentation:
-- optional overflow counter / dropped-command counter
-- optional watermark metrics for tuning queue size on hardware
-
-2. Queue API ergonomics:
-- expose explicit success/failure return path to callers for enqueue operations
-- optional timeout policy hooks on SH4 side
-
-3. Emulator alignment:
-- verify Python emulator behavior against latest queue/layout and policy changes
-- add regression tests for seek + policy timing interactions
-
-4. Documentation consolidation:
-- sync README and this design doc whenever constants/struct fields change
-- optionally auto-generate constant tables from headers
+- initialize allocator cursor to computed dynamic base 
 
 ---
 

@@ -1,6 +1,6 @@
 #include <afx/host.h>
 #include <afx/memory.h>
-#include <afx/bin/guarded_blob.h>
+#include <afx/bin/driver_blob.h>
 
 #include <dc/spu.h>
 #include <stdbool.h>

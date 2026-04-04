@@ -1,3 +1,3 @@
 [submodule "examples/enDjinn"]
-	path = examples/enDjinn
+	path = enDjinn
 	url = https://github.com/dfchil/enDjinn
