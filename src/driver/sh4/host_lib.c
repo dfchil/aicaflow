@@ -147,7 +147,7 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
   if (slot < AFX_FLOW_POOL_CAPACITY) {
     /* release channels */
     uint64_t mask = 0;
-    const volatile afx_flow_state_t *flow_state =
+    volatile afx_flow_state_t *flow_state =
         &drv_state_ptr->flow_states[slot];
     const afx_header_t *hdr =
         (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
@@ -159,24 +159,7 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
     afx_channels_release(mask);
     afx_channel_release_mapping(hdr->required_channels,
                                 flow_state->channel_map);
-
-    if (slot == drv_state_ptr->flow_count_active - 1) {
-      /* Simple case: just decrement active count to retire the last slot */
-      drv_state_ptr->flow_states[slot].status = AFX_FLOW_AVAILABLE;
-      drv_state_ptr->flow_count_active--;
-      return;
-    }
-    /* find last active slot and copy that to retired slot location */
-    for (int8_t i = drv_state_ptr->flow_count_active - 1; i > slot; i--) {
-      if (drv_state_ptr->flow_states[i].status != AFX_FLOW_RETIRED) {
-        /* Move this active slot down to the retired slot */
-        drv_state_ptr->flow_states[slot] = drv_state_ptr->flow_states[i];
-        /* Mark the moved slot as retired */
-        drv_state_ptr->flow_states[i].status = AFX_FLOW_AVAILABLE;
-        drv_state_ptr->flow_count_active--;
-        return;
-      }
-    }
+    flow_state->status = AFX_FLOW_AVAILABLE;
   }
 }
 
@@ -186,13 +169,26 @@ static uint8_t afx_state_allocate_flow_slot(uint8_t num_channels) {
   channels bound to retired slots so that they can be reused by new flows. We do
   this in the host code since the SPU firmware is focused on real-time flow
   processing and doesn't need to manage slot retirement or channel reuse logic.
+  */
 
-  Going backwards makes it computationally simpler to handle retired slots */
-  for (int8_t i = drv_state_ptr->flow_count_active - 1; i >= 0; i--) {
-    if (drv_state_ptr->flow_states[i].status == AFX_FLOW_RETIRED) {
+  int end = drv_state_ptr->flow_count_active - 1;
+  int i = 0;
+  afx_flow_state_t *flow_states = drv_state_ptr->flow_states;
+  while (i <= end) {
+    while(i <= end && flow_states[end].status == AFX_FLOW_RETIRED) {
+      afx_state_release_flow_slot(end);
+      end--;
+    }
+    if (flow_states[i].status == AFX_FLOW_RETIRED) {
       afx_state_release_flow_slot(i);
+      flow_states[i] = flow_states[end];
+      end--;
+    } else {
+      i++;
     }
   }
+  drv_state_ptr->flow_count_active = (uint8_t)(end + 1);
+
   if (drv_state_ptr->flow_count_active >= AFX_FLOW_POOL_CAPACITY) {
     return 0xFFu;
   }
@@ -294,13 +290,6 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state,
   }
 }
 
-bool afx_flow_deactivate(uint8_t flow_slot) {
-  if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
-    return false;
-  afx_state_release_flow_slot(flow_slot);
-  return true;
-}
-
 /**
  * Activate a flow for the given aicaflow at the SPU address
  *
@@ -313,9 +302,7 @@ bool afx_flow_deactivate(uint8_t flow_slot) {
  * @note This process cleans up slots marked by the SPU as retired, freeing
  * their bound channels.
  *
- * @note Loaded flows can be activated multiple times concurrently, but each
- * activation must be paired with a call to afx_flow_deactivate() to properly
- * release resources.
+ * @note Loaded flows can be activated multiple times concurrently.
  *
  * @note Activating a flow does not automatically start playback; call
  * afx_flow_play() with the returned slot to start playback.
