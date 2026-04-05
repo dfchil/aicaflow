@@ -218,22 +218,27 @@ int main(int argc, char **argv) {
             fseek(f, flow_data_off, SEEK_SET);
             uint32_t bytes_read = 0;
             while (bytes_read < flow_data_size) {
-                uint32_t ts;
-                uint16_t bits;
-                if (fread(&ts, 4, 1, f) != 1) break;
-                bytes_read += 4;
-                if (fread(&bits, 2, 1, f) != 1) break;
-                bytes_read += 2;
+                afx_cmd_t header;
+                if (fread(&header, 8, 1, f) != 1) break;
+                bytes_read += 8;
                 
-                uint8_t slot = bits & 0x3F;
-                uint8_t offset = (bits >> 6) & 0x1F;
-                uint8_t length = (bits >> 11) & 0x1F;
+                uint32_t ts     = header.timestamp;
+                uint8_t slot    = header.slot;
+                uint8_t offset  = header.offset;
+                uint8_t length  = header.length;
 
                 uint16_t values[32] = {0};
                 uint8_t values_read = 0;
                 for (; values_read < length; values_read++) {
                     if (fread(&values[values_read], 2, 1, f) != 1) break;
                     bytes_read += 2;
+                }
+
+                /* Align next command to 4-byte boundary */
+                if (bytes_read % 4 != 0) {
+                    uint32_t pad = 4 - (bytes_read % 4);
+                    fseek(f, pad, SEEK_CUR);
+                    bytes_read += pad;
                 }
 
                 aica_chnl_packed_t payload;

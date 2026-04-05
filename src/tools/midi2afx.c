@@ -414,19 +414,20 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
                                   uint8_t ar, uint8_t d1r, uint8_t d2r, uint8_t rr, uint8_t dl,
                                   uint8_t velocity, uint8_t midi_pan,
                                   uint8_t *buffer, uint32_t *buffer_size) {
+    (void)velocity;
+    (void)midi_pan;
     patch_info_t p = instrument_bank[program];
     if (p.size == 0) return;
 
-    uint32_t cmd_size = 6 + (6 * 2);
+    uint32_t cmd_size = 8 + (6 * 2);
     cmd_size = (cmd_size + 3) & ~3;
 
     afx_cmd_t *cmd = (afx_cmd_t *)(buffer + *buffer_size);
     memset(cmd, 0, cmd_size);
     cmd->timestamp = timestamp;
-    cmd->pack = 0;
-    AFX_CMD_SET_SLOT(cmd, slot);
-    AFX_CMD_SET_OFFSET(cmd, AICA_REG_SA_HI);
-    AFX_CMD_SET_LENGTH(cmd, 6);
+    cmd->slot = slot;
+    cmd->offset = AICA_REG_SA_HI;
+    cmd->length = 6;
 
     /* Bit 15: Key On, Bit 9: Loop, Bits [8:7]: Format, Bits [6:0]: SA_HI */
     uint32_t loop_bit = (sample_descs[program].loop_mode != AFX_LOOP_NONE) ? (1u << 9) : 0;
@@ -452,23 +453,21 @@ static void write_patch_flow_cmds(uint32_t timestamp, uint8_t slot, uint8_t prog
                                      ((uint32_t)(dl & 0x1F) << 3) |
                                      (rr & 0x1F));
 
-    cmd_size = (cmd_size + 3) & ~3;
     *buffer_size += cmd_size;
 }
 
 static void write_single_cmd(uint32_t timestamp, uint8_t slot, uint8_t reg, uint16_t value,
                              uint8_t *buffer, uint32_t *buffer_size) {
-    uint32_t cmd_size = 6 + (1 * 2);
+    uint32_t cmd_size = 8 + (1 * 2);
     cmd_size = (cmd_size + 3) & ~3;
 
     afx_cmd_t *cmd = (afx_cmd_t *)(buffer + *buffer_size);
     memset(cmd, 0, cmd_size);
     cmd->timestamp = timestamp;
-    cmd->pack = 0;
-    AFX_CMD_SET_SLOT(cmd, slot);
-    AFX_CMD_SET_OFFSET(cmd, reg);
-    AFX_CMD_SET_LENGTH(cmd, 1);
-    
+    cmd->slot = slot;
+    cmd->offset = reg;
+    cmd->length = 1;
+
     cmd->values[0] = value;
 
     *buffer_size += cmd_size;
@@ -492,16 +491,16 @@ int cmp_flow_cmds(const void *a, const void *b) {
 }
 
 static uint32_t afx_cmd_padded_size(const afx_cmd_t *cmd) {
-    uint32_t size = 6u + ((uint32_t)AFX_CMD_GET_LENGTH(cmd) << 1);
+    uint32_t size = 8u + ((uint32_t)cmd->length << 1);
     return AFX_ALIGN4(size);
 }
 
 static bool afx_cmd_get_sa_hi_word(const afx_cmd_t *cmd, uint16_t *out_val) {
     if (!cmd || !out_val) return false;
-    if (AFX_CMD_GET_OFFSET(cmd) > AICA_REG_SA_HI) return false;
-    if ((uint32_t)AFX_CMD_GET_OFFSET(cmd) + (uint32_t)AFX_CMD_GET_LENGTH(cmd) <= AICA_REG_SA_HI) return false;
+    if (cmd->offset > AICA_REG_SA_HI) return false;
+    if ((uint32_t)cmd->offset + (uint32_t)cmd->length <= AICA_REG_SA_HI) return false;
 
-    *out_val = cmd->values[AICA_REG_SA_HI - AFX_CMD_GET_OFFSET(cmd)];
+    *out_val = cmd->values[AICA_REG_SA_HI - cmd->offset];
     return true;
 }
 

@@ -109,21 +109,24 @@ typedef struct {
 } afx_sample_desc_t;
 
 #pragma pack(push, 1)
-/* Flow command (6 bytes + payload) */
+/* Flow command (8 bytes + payload) */
 typedef struct {
   uint32_t timestamp; /* Absolute time in ms */
-  uint16_t pack;
+  uint8_t slot;       /* Flow-relative channel slot */
+  uint8_t offset;     /* Register offset (0-31) */
+  uint8_t length;     /* Number of 16-bit values following */
+  uint8_t reserved;
   uint16_t values[];
 } afx_cmd_t;
-_Static_assert(sizeof(afx_cmd_t) == 6u, "afx_cmd_t must be 6 bytes header");
+_Static_assert(sizeof(afx_cmd_t) == 8u, "afx_cmd_t must be 8 bytes header");
 
-#define AFX_CMD_GET_SLOT(cmd)   ((cmd)->pack & 0x3F)
-#define AFX_CMD_GET_OFFSET(cmd) (((cmd)->pack >> 6) & 0x1F)
-#define AFX_CMD_GET_LENGTH(cmd) (((cmd)->pack >> 11) & 0x1F)
+#define AFX_CMD_GET_SLOT(cmd)   ((cmd)->slot)
+#define AFX_CMD_GET_OFFSET(cmd) ((cmd)->offset)
+#define AFX_CMD_GET_LENGTH(cmd) ((cmd)->length)
 
-#define AFX_CMD_SET_SLOT(cmd, slot)   (cmd)->pack = ((cmd)->pack & ~0x3F) | ((slot) & 0x3F)
-#define AFX_CMD_SET_OFFSET(cmd, off)  (cmd)->pack = ((cmd)->pack & ~(0x1F << 6)) | (((off) & 0x1F) << 6)
-#define AFX_CMD_SET_LENGTH(cmd, len)  (cmd)->pack = ((cmd)->pack & ~(0x1F << 11)) | (((len) & 0x1F) << 11)
+#define AFX_CMD_SET_SLOT(cmd, s)   (cmd)->slot = (s)
+#define AFX_CMD_SET_OFFSET(cmd, o)  (cmd)->offset = (o)
+#define AFX_CMD_SET_LENGTH(cmd, l)  (cmd)->length = (l)
 
 /* IPC Command (16 bytes) */
 typedef struct {

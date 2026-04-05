@@ -62,14 +62,14 @@ uint32_t afx_channel_setup_mapping(uint8_t num_channels, uint64_t channel_mask) 
   /* map virtual channels */
   uint32_t flow_chn = 0;
   for (uint32_t hw = 0; hw < 64u; hw++) {
-    if (mask & (1ULL << hw)) {
+    if (channel_mask & (1ULL << hw)) {
       drv_state_ptr->chan_arenas[arena][offset + flow_chn] = (uint8_t)hw;
       flow_chn++;
       if (flow_chn >= num_channels)
         break;
     }
   }
-  return (arena << 6) | offset;
+  return AFX_DRIVER_STATE_ADDR + offsetof(afx_driver_state_t, chan_arenas[arena][offset]);
 }
 
 
@@ -77,13 +77,23 @@ void afx_channels_release(uint64_t channel_mask) {
   g_host_available_channels |= channel_mask;
 }
 
-void afx_channel_release_mapping(uint8_t num_channels, uint32_t offset) {
+void afx_channel_release_mapping(uint8_t num_channels, uint32_t channel_map_addr) {
   if (num_channels == 0 || num_channels > 64)
     return;
 
-  int arena = offset >> 6u;
-  uint64_t mask = ((~0ULL >> (64 - num_channels)) << (offset & 0x3F));
-  g_host_channel_maps[arena] &= ~mask;
+  uint32_t base_arenas = AFX_DRIVER_STATE_ADDR + offsetof(afx_driver_state_t, chan_arenas[0][0]);
+  if (channel_map_addr < base_arenas)
+    return;
+
+  uint32_t map_offset = channel_map_addr - base_arenas;
+  int arena = map_offset / 64;
+  uint32_t offset_in_arena = map_offset % 64;
+
+  if (arena > 4)
+    return;
+
+  uint64_t mask = (~0ULL >> (64 - num_channels));
+  g_host_channel_maps[arena] &= ~(mask << offset_in_arena);
 }
 
 void afx_channels_reset() {

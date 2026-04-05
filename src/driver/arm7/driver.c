@@ -132,7 +132,7 @@ static inline uint32_t flow_step_until_tick(volatile afx_flow_state_t *flow,
 
     cmd2chnl(flow, cmd);
 
-    uint32_t cmd_size = 6u + ((uint32_t)AFX_CMD_GET_LENGTH(cmd) << 1);
+    uint32_t cmd_size = 8u + ((uint32_t)cmd->length << 1);
     cmd_size = (cmd_size + 3u) & ~3u;
     offset += cmd_size;
   }
@@ -167,7 +167,6 @@ void arm_main(void) {
     : "r0", "memory");
 
   drv_state_ptr->arm_status = 0;
-  drv_state_ptr->flow_count_active = 0;
   for (uint32_t i = 0; i < AFX_FLOW_POOL_CAPACITY; i++) {
     drv_state_ptr->flow_states[i].status = AFX_FLOW_AVAILABLE;
   }
@@ -177,6 +176,10 @@ void arm_main(void) {
   *AICA_VIRTUAL_CLOCK = 0;
   *AICA_CMD_COUNT = 0;
 
+  // IPC Ring buffer init
+  drv_state_ptr->ipc_head = 0;
+  drv_state_ptr->ipc_tail = 0;
+
   while (1) {
     uint32_t hw_delta = *AICA_HW_CLOCK - *AICA_PREV_HW_CLOCK;
     if (hw_delta > 0) {
@@ -184,33 +187,83 @@ void arm_main(void) {
       *AICA_VIRTUAL_CLOCK += hw_delta;
     }
 
+    /* Process IPC Commands from SH4 */
+    while (drv_state_ptr->ipc_tail != drv_state_ptr->ipc_head) {
+      uint32_t tail = drv_state_ptr->ipc_tail;
+      volatile afx_ipc_cmd_t *cmd = &drv_state_ptr->ipc_queue[tail];
+      volatile afx_flow_state_t *flow = &drv_state_ptr->flow_states[cmd->arg0];
+
+      switch(cmd->cmd) {
+        case AFX_CMD_PLAY_FLOW:
+          if (flow->status != AFX_FLOW_PAUSED) {
+            flow->flow_offset = 0;
+            flow->next_event_tick = 0;
+            flow->tick_adjust = *AICA_VIRTUAL_CLOCK;
+          }
+          flow->status = AFX_FLOW_PLAYING;
+          break;
+        
+        case AFX_CMD_PAUSE_FLOW:
+          flow->status = AFX_FLOW_PAUSED;
+          break;
+        
+        case AFX_CMD_RESUME_FLOW:
+          if (flow->status == AFX_FLOW_PAUSED) {
+            uint32_t paused_next_tick = flow->next_event_tick;
+            flow->tick_adjust = *AICA_VIRTUAL_CLOCK - paused_next_tick;
+            flow->status = AFX_FLOW_PLAYING;
+          }
+          break;
+        
+        case AFX_CMD_STOP_FLOW:
+          flow->flow_offset = 0;
+          flow->tick_adjust = 0;
+          flow->next_event_tick = 0;
+          flow->status = AFX_FLOW_STOPPED;
+          break;
+
+        case AFX_CMD_SEEK_FLOW:
+          flow->flow_offset = cmd->arg1; // computed flow_offset
+          flow->next_event_tick = cmd->arg2; // tick_ms
+          flow->tick_adjust = *AICA_VIRTUAL_CLOCK - cmd->arg2;
+          flow->status = AFX_FLOW_STOPPED; /* Wait for play command */
+          break;
+
+        case AFX_CMD_ACTIVATE_FLOW: {
+          uint32_t base = cmd->arg1;
+          const afx_header_t *h = (const afx_header_t *)base;
+          flow->afx_base = base;
+          flow->flow_ptr = base + h->flow_offset;
+          flow->channel_map = cmd->arg2; // mapping ptr
+          flow->flow_offset = 0;
+          flow->next_event_tick = 0;
+          flow->tick_adjust = 0;
+          flow->sample_addr_mode = (h->flags & AFX_FILE_FLAG_EXTERNAL_SAMPLE_ADDRS) ? 1 : 0;
+          flow->status = AFX_FLOW_STOPPED;
+          break;
+        }
+      }
+      
+      drv_state_ptr->ipc_tail = (tail + 1) & (AFX_IPC_QUEUE_CAPACITY - 1);
+    }
+
     if (drv_state_ptr->stack_canary != 0xDEADB12D) {
       drv_state_ptr->arm_status = 3;
       break;
     }
     uint32_t active = 0;
-    uint8_t i = 0;
 
-    while (i < drv_state_ptr->flow_count_active) {
-      volatile afx_flow_state_t *flow = drv_state_ptr->flow_states + i;
-      if (!flow) {
-        i++;
-        continue;
-      }
+    for (uint32_t i = 0; i < AFX_FLOW_POOL_CAPACITY; i++) {
+      volatile afx_flow_state_t *flow = &drv_state_ptr->flow_states[i];
       if (flow->status == AFX_FLOW_PLAYING) {
         active = 1;
-        // if (flow->next_event_tick + flow->tick_adjust <= *AICA_VIRTUAL_CLOCK) {
-          flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
-        // }
+        flow_step_until_tick(flow, *AICA_VIRTUAL_CLOCK);
 
-        if (((afx_header_t *)flow->afx_base)->total_ticks > 0 &&
-            (*AICA_VIRTUAL_CLOCK) - flow->tick_adjust >=
-                ((afx_header_t *)flow->afx_base)->total_ticks) {
+        const afx_header_t *hdr = (const afx_header_t *)flow->afx_base;
+        if (hdr->total_ticks > 0 &&
+            (*AICA_VIRTUAL_CLOCK) - flow->tick_adjust >= hdr->total_ticks) {
           flow->status = AFX_FLOW_RETIRED;
         }
-        i++;
-      } else {
-        i++;
       }
     }
     drv_state_ptr->arm_status = active ? 1u : 0u;

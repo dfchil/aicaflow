@@ -1,4 +1,7 @@
 - guard memory access from sh4 like kos drivers do
 - make slot references from user code in sh4 be references to a slot offset to allow compacting not to break reference
 - split command flow into timestamps with channel targets and register values, with the former referencing the latter (should be a huge memory save)
+  - Note: making the timestamps regular in size will re-enable binary seek 
 - make a player visualization on pvr in simple player using the terminal code
+- The design decision to have multiple LUT volume scaling tables is probably wrong
+  - scale in linear space first, then use shared table, meaning LUT reference can just be a single integer instead

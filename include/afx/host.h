@@ -46,7 +46,6 @@ bool afx_init(void);
 
 /* Flow-based playback API */
 uint8_t afx_flow_activate(uint32_t song_spu_addr); /* 0xFF on failure */
-bool afx_flow_set_tl_scale_lut(uint8_t flow_slot, uint32_t lut_spu_addr);
 void afx_flow_play(uint8_t flow_slot);
 void afx_flow_pause(uint8_t flow_slot);
 void afx_flow_resume(uint8_t flow_slot);

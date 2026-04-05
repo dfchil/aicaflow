@@ -16,8 +16,20 @@
 /* Flow-level flags (afx_flow_state_t.flags) */
 #define AFX_FLOW_FLAG_SAMPLE_ADDRS_ABSOLUTE 0x00000001u
 
+/* IPC Command queue geometry */
+#define AFX_IPC_QUEUE_CAPACITY 64u
+
+/* IPC Command Types */
+#define AFX_CMD_NONE           0
+#define AFX_CMD_PLAY_FLOW      1
+#define AFX_CMD_STOP_FLOW      2
+#define AFX_CMD_PAUSE_FLOW     3
+#define AFX_CMD_RESUME_FLOW    4
+#define AFX_CMD_SET_GLOBAL_VOL 5
+#define AFX_CMD_SEEK_FLOW      6
+#define AFX_CMD_ACTIVATE_FLOW  7
+
 #pragma pack(push, 1)  // Ensure no padding in these structures for direct
-                       // memory mapping to SPU RAM
 
 typedef struct afx_flow_state {
   /* Stream data */
@@ -44,10 +56,14 @@ typedef struct {
   uint32_t stack_canary;   /* Stack overflow detection (0xDEADB12D) */
   uint32_t mini_stack[64]; /* Small execution stack */
   struct {
-    uint32_t flow_count_active : 6; /* Number of active flows */
     uint32_t arm_status : 2;        /* 0=Idle, 1=Playing, 3=Error */
-    uint32_t reserved : 24;
+    uint32_t reserved : 30;
   };
+  
+  uint32_t ipc_head; /* Modified only by SH4 (Producer) */
+  uint32_t ipc_tail; /* Modified only by ARM7 (Consumer) */
+  afx_ipc_cmd_t ipc_queue[AFX_IPC_QUEUE_CAPACITY]; /* Ring Buffer */
+
   uint8_t chan_arenas[5]
                      [64]; /* arena[0] for 1-4 channels, arena[1] for 5-8
                               channels, arena[2] for 9-16 channels, arena[3] for

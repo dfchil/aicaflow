@@ -49,6 +49,7 @@ static const afx_section_entry_t *find_afx_section(const afx_header_t *hdr,
   return NULL;
 }
 
+/*
 static void apply_song_dsp_sections_host(uint32_t flow_spu_addr) {
   const afx_header_t *hdr =
       (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + flow_spu_addr);
@@ -80,6 +81,7 @@ static void apply_song_dsp_sections_host(uint32_t flow_spu_addr) {
       dst[w] = src[w];
   }
 }
+*/
 
 uint32_t afx_upload_tl_scale_lut(const uint8_t lut[256]) {
   if (!lut)
@@ -153,7 +155,7 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
         (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
                                           flow_state->afx_base);
     for (uint32_t ch = 0; ch < hdr->required_channels; ch++) {
-      uint8_t hw_ch = ((uint8_t *)flow_state->channel_map)[ch];
+      uint8_t hw_ch = ((uint8_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + flow_state->channel_map))[ch];
       mask |= (1ULL << hw_ch);
     }
     afx_channels_release(mask);
@@ -164,38 +166,25 @@ static inline void afx_state_release_flow_slot(uint8_t slot) {
 }
 
 static uint8_t afx_state_allocate_flow_slot(uint8_t num_channels) {
-
-  /* Free up any retired slots before allocating a new one. This also releases
-  channels bound to retired slots so that they can be reused by new flows. We do
-  this in the host code since the SPU firmware is focused on real-time flow
-  processing and doesn't need to manage slot retirement or channel reuse logic.
-  */
-
-  int end = drv_state_ptr->flow_count_active - 1;
-  int i = 0;
-  afx_flow_state_t *flow_states = drv_state_ptr->flow_states;
-  while (i <= end) {
-    while(i <= end && flow_states[end].status == AFX_FLOW_RETIRED) {
-      afx_state_release_flow_slot(end);
-      end--;
+  /* Find first available slot (Sparse Array Approach) */
+  for (uint32_t i = 0; i < AFX_FLOW_POOL_CAPACITY; i++) {
+    if (drv_state_ptr->flow_states[i].status == AFX_FLOW_AVAILABLE) {
+      /* Mark as reserved but STOPPED; activation command will finish init */
+      drv_state_ptr->flow_states[i].status = AFX_FLOW_STOPPED;
+      return (uint8_t)i;
     }
-    if (flow_states[i].status == AFX_FLOW_RETIRED) {
+  }
+
+  /* Scan for retired slots to reclaim them */
+  for (uint32_t i = 0; i < AFX_FLOW_POOL_CAPACITY; i++) {
+    if (drv_state_ptr->flow_states[i].status == AFX_FLOW_RETIRED) {
       afx_state_release_flow_slot(i);
-      flow_states[i] = flow_states[end];
-      end--;
-    } else {
-      i++;
+      drv_state_ptr->flow_states[i].status = AFX_FLOW_STOPPED;
+      return (uint8_t)i;
     }
   }
-  drv_state_ptr->flow_count_active = (uint8_t)(end + 1);
-
-  if (drv_state_ptr->flow_count_active >= AFX_FLOW_POOL_CAPACITY) {
-    return 0xFFu;
-  }
-
-  uint8_t slot = drv_state_ptr->flow_count_active;
-  drv_state_ptr->flow_count_active++;
-  return slot;
+  
+  return 0xFFu;
 }
 
 void afx_driver_state_info(const volatile afx_driver_state_t *driver_state,
@@ -218,8 +207,6 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state,
          (const void *)driver_state);
   printf("[AFX]  stack_canary = 0x%08X\n",
          (unsigned)driver_state->stack_canary);
-  printf("[AFX]  flow_count_active = %u\n",
-         (unsigned)driver_state->flow_count_active);
   printf("[AFX]  AICA_CMD_COUNT = %u\n", (unsigned)cmd_count);
   printf("[AFX]  arm_status = %u\n", (unsigned)driver_state->arm_status);
   printf("[AFX]  HW clock = %lu, prev = %lu, virtual = %lu\n", hw_clock,
@@ -262,7 +249,7 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state,
     cm_len += snprintf(channel_map_str + cm_len,
                        sizeof(channel_map_str) - cm_len, "[");
     for (uint32_t ch = 0; ch < required_channels; ch++) {
-      uint32_t hw = ((uint8_t *)f->channel_map)[ch];
+      uint32_t hw = ((uint8_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + f->channel_map))[ch];
       if (hw != AFX_FLOW_CHANNEL_MAP_INVALID) {
         cm_len += snprintf(channel_map_str + cm_len,
                            sizeof(channel_map_str) - cm_len, "%s%u->%u",
@@ -307,13 +294,30 @@ void afx_driver_state_info(const volatile afx_driver_state_t *driver_state,
  * @note Activating a flow does not automatically start playback; call
  * afx_flow_play() with the returned slot to start playback.
  * */
-uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
+static inline bool afx_ipc_enqueue(uint32_t cmd, uint32_t arg0, uint32_t arg1,
+                                   uint32_t arg2) {
+  volatile afx_driver_state_t *driver = drv_state_ptr;
+  uint32_t head = driver->ipc_head;
+  uint32_t next_head = (head + 1) & (AFX_IPC_QUEUE_CAPACITY - 1);
+  if (next_head == driver->ipc_tail) {
+    return false; // Queue full
+  }
+  
+  volatile afx_ipc_cmd_t *q_cmd = &driver->ipc_queue[head];
+  q_cmd->cmd = cmd;
+  q_cmd->arg0 = arg0; // flow_idx
+  q_cmd->arg1 = arg1;
+  q_cmd->arg2 = arg2;
 
+  __asm__ __volatile__("":::"memory"); /* Compiler barrier */
+  driver->ipc_head = next_head;
+  return true;
+}
+
+uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
   if (flow_spu_addr == 0 || flow_spu_addr > AFX_DRIVER_STATE_ADDR)
     return 0xFFu;
-  if (drv_state_ptr->flow_count_active >= AFX_FLOW_POOL_CAPACITY) {
-    return 0xFFu;
-  }
+
   const afx_header_t *hdr =
       (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 + flow_spu_addr);
 
@@ -331,7 +335,6 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
     return 0xFFu;
 
   uint32_t required_channels = hdr->required_channels;
-
   if (required_channels == 0 || required_channels > 64u)
     return 0xFFu;
 
@@ -339,96 +342,41 @@ uint8_t afx_flow_activate(uint32_t flow_spu_addr) {
   if (channel_mask == 0)
     return 0xFFu;
 
-  alignas(32) afx_flow_state_t flow_template;
-  memset(&flow_template, 0, sizeof(flow_template));
-  flow_template.channel_map =
-      afx_channel_setup_mapping(required_channels, channel_mask);
-  flow_template.afx_base = flow_spu_addr;
-  flow_template.flow_ptr = flow_spu_addr + hdr->flow_offset;
-  flow_template.flow_offset = 0;
-  flow_template.next_event_tick = 0;
-  flow_template.sample_addr_mode = uses_external_samples;
-  flow_template.status = AFX_FLOW_STOPPED;
+  uint32_t channel_map_addr = afx_channel_setup_mapping(required_channels, channel_mask);
 
-  afx_driver_state_t *local_copy = drv_state_ptr;
+  /* Send ACTIVATE command instead of writing flow_state directly */
+  /* arg1 = flow_spu_addr, arg2 = channel_map_addr */
+  if (!afx_ipc_enqueue(AFX_CMD_ACTIVATE_FLOW, flow_slot, flow_spu_addr, channel_map_addr)) {
+    return 0xFFu; // Queue full
+  }
 
-  g2_write_block_8((uint8_t *)&flow_template,(uintptr_t)
-                   (&local_copy->flow_states[flow_slot] - SPU_RAM_BASE_SH4),
-                   sizeof(afx_flow_state_t));
   return flow_slot;
-}
-
-bool afx_flow_set_tl_scale_lut(uint8_t flow_slot, uint32_t lut_spu_addr) {
-  //   uint32_t flow_addr = drv_state_ptr->flow_states[flow_slot].afx_base +
-  //                        offsetof(afx_flow_state_t, tl_scale_lut_ptr);
-  //   if (flow_addr == 0)
-  //     return false;
-
-  //   uint32_t field_addr =
-  //       flow_addr + (uint32_t)offsetof(afx_flow_state_t, tl_scale_lut_ptr);
-  //   return afx_mem_write(field_addr, &lut_spu_addr, sizeof(lut_spu_addr));
-  return true;
 }
 
 void afx_flow_play(uint8_t flow_slot) {
   if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
     return;
 
-  volatile afx_flow_state_t *flow_state =
-      &drv_state_ptr->flow_states[flow_slot];
-  volatile afx_driver_state_t *driver = drv_state_ptr;
-  const afx_header_t *hdr =
-      driver->flow_states[flow_slot].afx_base != 0
-          ? (const afx_header_t *)(uintptr_t)(SPU_RAM_BASE_SH4 +
-                                              flow_state->afx_base)
-          : NULL;
-
-  if (hdr && hdr->magic != AICAF_MAGIC) {
-    printf("[SFX] invalid flow in slot %d: magic=0x%08X\n", flow_slot,
-           hdr->magic);
-    return;
-  }
-
-  // if (flow_state->afx_base != 0) {  // this is pretty wrong TODO: investigate
-  // why this check was here and if it can be removed
-  //   apply_song_dsp_sections_host(flow_state->afx_base);
-  // }
-
-  // If this is a fresh play (or after stop), reset playback pointers.
-  if (flow_state->status != AFX_FLOW_PAUSED) {
-    flow_state->flow_offset = 0;
-    flow_state->next_event_tick = 0;
-    flow_state->tick_adjust = *AICA_VIRTUAL_CLOCK;
-  }
-
-  flow_state->status = AFX_FLOW_PLAYING;
+  afx_ipc_enqueue(AFX_CMD_PLAY_FLOW, flow_slot, 0, 0);
 }
 
 void afx_flow_pause(uint8_t flow_slot) {
-  drv_state_ptr->flow_states[flow_slot].status = AFX_FLOW_PAUSED;
+  if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
+    return;
+  afx_ipc_enqueue(AFX_CMD_PAUSE_FLOW, flow_slot, 0, 0);
 }
 
 void afx_flow_resume(uint8_t flow_slot) {
   if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
     return;
 
-  volatile afx_flow_state_t *flow_state =
-      &drv_state_ptr->flow_states[flow_slot];
-  if (flow_state->status != AFX_FLOW_PAUSED)
-    return;
-
-  // Rebase tick_adjust so playback resumes from paused next_event_tick at
-  // current wall-clock time.
-  uint32_t paused_next_tick = flow_state->next_event_tick;
-  flow_state->tick_adjust = *AICA_VIRTUAL_CLOCK - paused_next_tick;
-  flow_state->status = AFX_FLOW_PLAYING;
+  afx_ipc_enqueue(AFX_CMD_RESUME_FLOW, flow_slot, 0, 0);
 }
 
 void afx_flow_stop(uint8_t flow_slot) {
-  drv_state_ptr->flow_states[flow_slot].flow_offset = 0;
-  drv_state_ptr->flow_states[flow_slot].tick_adjust = 0;
-  drv_state_ptr->flow_states[flow_slot].next_event_tick = 0;
-  drv_state_ptr->flow_states[flow_slot].status = AFX_FLOW_STOPPED;
+  if (flow_slot >= AFX_FLOW_POOL_CAPACITY)
+    return;
+  afx_ipc_enqueue(AFX_CMD_STOP_FLOW, flow_slot, 0, 0);
 }
 
 void afx_flow_seek(uint8_t flow_slot, uint32_t tick_ms) {
@@ -444,8 +392,7 @@ void afx_flow_seek(uint8_t flow_slot, uint32_t tick_ms) {
   uint32_t flow_offset = afx_cmd_lower_bound_by_offset(
       (const uint8_t *)flow->flow_ptr, hdr->flow_size, 0, tick_ms);
 
-  flow->flow_offset = flow_offset;
-  flow->next_event_tick = tick_ms;
-  flow->tick_adjust = *AICA_VIRTUAL_CLOCK - tick_ms;
-  flow->status = AFX_FLOW_STOPPED;
+  // Send seek details to ARM7
+  // arg1 = flow_offset, arg2 = tick_ms
+  afx_ipc_enqueue(AFX_CMD_SEEK_FLOW, flow_slot, flow_offset, tick_ms);
 }

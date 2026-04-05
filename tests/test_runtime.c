@@ -16,7 +16,7 @@ static inline uint32_t afx_scale_total_level(uint32_t tl, uint32_t volume) {
 
 
 static void test_struct_layout(void) {
-    assert(sizeof(afx_header_t) == 16u);
+    assert(sizeof(afx_header_t) == 24u);
     assert(sizeof(afx_section_entry_t) == 24);
     assert(sizeof(afx_sample_desc_t) == 32);
     /* Variable-length command header is 6 bytes + values array */
@@ -33,11 +33,12 @@ static void test_struct_layout(void) {
 }
 
 static void test_driver_state_abi(void) {
+    printf("(offsetof(afx_driver_state_t, flow_states) = %zu)\n", offsetof(afx_driver_state_t, flow_states));
     /* Driver runtime state now uses array flow entries and counters. */
-    assert(sizeof(afx_driver_state_t) == 2632u);
+    assert(sizeof(afx_driver_state_t) == 3664u);
     assert(offsetof(afx_driver_state_t, stack_canary) == 0u);
     assert(offsetof(afx_driver_state_t, mini_stack) == 4u);
-    assert(offsetof(afx_driver_state_t, flow_states) == 584u);
+    assert(offsetof(afx_driver_state_t, flow_states) == 1616u);
 
     /* Flow state carries optional per-flow LUT pointer. */
     assert(offsetof(afx_flow_state_t, tl_scale_lut_ptr) == 20u);

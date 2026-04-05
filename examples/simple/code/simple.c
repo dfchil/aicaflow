@@ -147,10 +147,9 @@ static uint32_t create_sfx_flow(uint32_t sample_handle) {
 
   afx_cmd_t *cmd0 = (afx_cmd_t *)cursor;
   cmd0->timestamp = 0;
-  cmd0->pack = 0;
-  AFX_CMD_SET_SLOT(cmd0, 0);
-  AFX_CMD_SET_OFFSET(cmd0, reg_play_ctrl);
-  AFX_CMD_SET_LENGTH(cmd0, startup_reg_count);
+  cmd0->slot = 0;
+  cmd0->offset = reg_play_ctrl;
+  cmd0->length = startup_reg_count;
 
   aica_chnl_packed_t *chncfg = (aica_chnl_packed_t *)cmd0->values;
 
@@ -225,23 +224,22 @@ static uint32_t create_sfx_flow(uint32_t sample_handle) {
          AFX_CMD_GET_SLOT(cmd0), pcms, sa_high, chncfg->sa_low,
          chncfg->pitch.raw, 0, 0xF);
 
-  uint32_t cmd0_size = 6 + (AFX_CMD_GET_LENGTH(cmd0) * 2);
+  uint32_t cmd0_size = 8 + (AFX_CMD_GET_LENGTH(cmd0) * 2);
   cmd0_size = (cmd0_size + 3) & ~3;
   cursor = blob + flow_off + cmd0_size;
 
   /* Terminating key-off command at end of sample time */
   afx_cmd_t *cmd1 = (afx_cmd_t *)cursor;
   cmd1->timestamp = duration_ms;
-  cmd1->pack = 0;
-  AFX_CMD_SET_SLOT(cmd1, 0);
-  AFX_CMD_SET_OFFSET(cmd1, reg_play_ctrl);
-  AFX_CMD_SET_LENGTH(cmd1, 1);
+  cmd1->slot = 0;
+  cmd1->offset = reg_play_ctrl;
+  cmd1->length = 1;
 
   aica_chnl_packed_t *keyoff = (aica_chnl_packed_t *)cmd1->values;
   /* Key On = 0, Key Off = 1 to release the note */
   keyoff->play_ctrl.raw = (1 << 14);
 
-  uint32_t cmd1_size = 6 + (AFX_CMD_GET_LENGTH(cmd1) * 2);
+  uint32_t cmd1_size = 8 + (AFX_CMD_GET_LENGTH(cmd1) * 2);
   cmd1_size = (cmd1_size + 3) & ~3;
   cursor += cmd1_size;
 
@@ -277,19 +275,12 @@ static void play_sfx(void *data) {
 
     uint8_t slot = afx_flow_activate(state->flows[state->cursor_pos]);
 
-    printf("[SFX] flow activate returned slot %u\n",
-           drv_state_ptr->flow_count_active > 0 ? slot : 0xFFu);
-    afx_flow_state_t *flowstate =
-        drv_state_ptr->flow_states + slot;
-    afx_header_t *hdr =
-        (afx_header_t *)(flowstate->afx_base + SPU_RAM_BASE_SH4);
-    // if (hdr->magic != AICAF_MAGIC) {
-    //   printf("[SFX] invalid flow in slot %d: magic=0x%08X\n", state->cursor_pos,
-    //          hdr->magic);
-    //   return;
-    // }
-
-    afx_flow_play(slot);
+    if (slot != 0xFFu) {
+      printf("[SFX] flow activate returned slot %u\n", slot);
+      afx_flow_play(slot);
+    } else {
+      printf("[SFX] flow activate failed\n");
+    }
   } else {
     printf("[SFX] trigger ignored: invalid sample handle\n");
   }
