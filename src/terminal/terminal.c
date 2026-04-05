@@ -1,5 +1,9 @@
-#include <enDjinn/enj_enDjinn.h>
-#include <terminal.h>
+#include <enDjinn/enj_font.h>
+
+#define ENJ_INJECT_QFONT
+#include <enDjinn/enj_qfont.h>
+
+#include <terminal/terminal.h>
 
 void terminal_clear(terminal_buffer_t *term) {
   for (int y = 0; y < TERMINAL_LINES_CAPACITY; y++) {

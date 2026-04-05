@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 uint64_t g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
+uint64_t g_host_available_channels_init = 0;
 static uint64_t g_host_channel_maps[5] = {0};
 
 #define drv_state_ptr                                                          \
@@ -13,22 +14,27 @@ static uint64_t g_host_channel_maps[5] = {0};
 
 
 uint64_t afx_channels_allocate(uint8_t num_channels) {
+  if (g_host_available_channels_init == 0) {
+    g_host_available_channels = 0xFFFFFFFFFFFFFFFFULL;
+    g_host_available_channels_init = 1;
+  }
   if (num_channels == 0 || num_channels > 64)
     return 0;
 
   uint64_t allocated = 0;
+  uint64_t current_available = g_host_available_channels;
   for (uint32_t bit = 0; bit < 64u && num_channels > 0; bit++) {
     uint64_t b = (1ULL << bit);
-    if (g_host_available_channels & b) {
-      g_host_available_channels &= ~b;
+    if (current_available & b) {
+      current_available &= ~b;
       allocated |= b;
       num_channels--;
     }
   }
   if (num_channels != 0) {
-    g_host_available_channels |= allocated;
     return 0;
   }
+  g_host_available_channels = current_available;
   return allocated;
 }
 

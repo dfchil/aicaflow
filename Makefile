@@ -2,7 +2,11 @@
 
 .PHONY: all clean tools driver test test-unit test-integration help submodules examples
 
-all: submodules driver tools examples
+all: driver driver submodules terminal tools examples 
+
+terminal:
+	@echo "--- Building Terminal Library ---"
+	$(MAKE) -C src/terminal
 
 examples:
 	@echo "--- Building Examples ---"

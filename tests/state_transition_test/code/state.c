@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <terminal.h>
+#include <terminal/terminal.h>
 
 #define AICA_CLOCK_ADDR                                                        \
   0x001FFFE0 /* Reserve uppermost 4 words for clock registers */
